@@ -1,5 +1,12 @@
 import { type AssistantStream, createAssistantStream } from "assistant-stream";
-import { type FC, type PropsWithChildren, useMemo } from "react";
+import {
+  type FC,
+  type PropsWithChildren,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useAui } from "@assistant-ui/store";
 import type {
   RemoteThreadInitializeResponse,
@@ -14,7 +21,11 @@ import type {
   ExportedMessageRepository,
   ExportedMessageRepositoryItem,
 } from "../../internal";
-import { RuntimeAdapterProvider } from "../runtimes/RuntimeAdapterProvider";
+import { isRecord } from "../../utils/json/is-json";
+import {
+  RuntimeAdapterProvider,
+  type RuntimeAdapters,
+} from "../runtimes/RuntimeAdapterProvider";
 import type { TitleGenerationAdapter } from "./TitleGenerationAdapter";
 
 export type AsyncStorageLike = {
@@ -71,9 +82,6 @@ type StoredThreadMetadata = {
 type StoredSystemMessage = Extract<ThreadMessage, { role: "system" }>;
 type StoredUserMessage = Extract<ThreadMessage, { role: "user" }>;
 type StoredAssistantMessage = Extract<ThreadMessage, { role: "assistant" }>;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const parseJSON = (raw: string | null): unknown => {
   if (!raw) return undefined;
@@ -276,20 +284,24 @@ export const parseStoredMessageRepository = (
 
 class AsyncStorageHistoryAdapter implements ThreadHistoryAdapter {
   private storage: AsyncStorageLike;
-  private aui: ReturnType<typeof useAui>;
+  private getAui: () => ReturnType<typeof useAui>;
   private prefix: string;
   private mutationQueue: KeyedMutationQueue;
 
   constructor(
     storage: AsyncStorageLike,
-    aui: ReturnType<typeof useAui>,
+    getAui: () => ReturnType<typeof useAui>,
     prefix: string,
     mutationQueue: KeyedMutationQueue,
   ) {
     this.storage = storage;
-    this.aui = aui;
+    this.getAui = getAui;
     this.prefix = prefix;
     this.mutationQueue = mutationQueue;
+  }
+
+  private get aui(): ReturnType<typeof useAui> {
+    return this.getAui();
   }
 
   private _messagesKey(remoteId: string) {
@@ -327,19 +339,40 @@ class AsyncStorageHistoryAdapter implements ThreadHistoryAdapter {
   }
 }
 
+const useLocalStorageThreadAdapters = (
+  storage: AsyncStorageLike,
+  prefix: string,
+  mutationQueue: KeyedMutationQueue,
+): RuntimeAdapters => {
+  const aui = useAui();
+  // Not useEffectEvent: history adapter methods run during render (SSR load).
+  const auiRef = useRef(aui);
+  useEffect(() => {
+    auiRef.current = aui;
+  });
+  const [history] = useState(
+    () =>
+      new AsyncStorageHistoryAdapter(
+        storage,
+        () => auiRef.current,
+        prefix,
+        mutationQueue,
+      ),
+  );
+  return useMemo(() => ({ history }), [history]);
+};
+
 const createHistoryProvider = (
   storage: AsyncStorageLike,
   prefix: string,
   mutationQueue: KeyedMutationQueue,
 ): FC<PropsWithChildren> => {
   const Provider: FC<PropsWithChildren> = ({ children }) => {
-    const aui = useAui();
-    const history = useMemo(
-      () => new AsyncStorageHistoryAdapter(storage, aui, prefix, mutationQueue),
-      [aui],
+    const adapters = useLocalStorageThreadAdapters(
+      storage,
+      prefix,
+      mutationQueue,
     );
-    const adapters = useMemo(() => ({ history }), [history]);
-
     return (
       <RuntimeAdapterProvider adapters={adapters}>
         {children}
@@ -385,6 +418,9 @@ export const createLocalStorageAdapter = (
 
   const adapter: RemoteThreadListAdapter = {
     unstable_Provider: createHistoryProvider(storage, prefix, mutationQueue),
+    unstable_useAdapters: function useLocalStorageAdapters() {
+      return useLocalStorageThreadAdapters(storage, prefix, mutationQueue);
+    },
 
     async list(): Promise<RemoteThreadListResponse> {
       const threads = await loadThreadMetadata();

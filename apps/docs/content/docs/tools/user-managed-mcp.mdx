@@ -15,14 +15,18 @@ Both flow through one connection lifecycle, one persisted state surface, and one
 ## How it works
 
 ```
-useAui({ mcp: McpManagerResource({ connectors }) })
+AuiConfig({ mcp: McpManagerResource({ connectors }) })
         │
         ├─ Resource — connection lifecycle, server lookup, OAuth/bearer auth
         ├─ Auto-mounts the modelContext scope when no chat runtime provides one
         └─ Registers connected tools as frontend tools — your chat sees them automatically
 ```
 
-The manager is a single resource. Mount it with `useAui` like any other scope. OAuth (PKCE + RFC 7591 dynamic client registration), bearer, and "no auth" are first-class. Token refresh runs inside the MCP SDK on 401; this package mediates persistence and the redirect step.
+The manager is a single resource. Mount it with `AuiProvider` like any other scope. OAuth (PKCE + RFC 7591 dynamic client registration), bearer, and "no auth" are first-class. Token refresh runs inside the MCP SDK on 401; this package mediates persistence and the redirect step.
+
+<Callout type="info">
+The [2026-07-28 spec revision](https://modelcontextprotocol.io/specification/2026-07-28/changelog) deprecates RFC 7591 dynamic client registration in favor of [Client ID Metadata Documents](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration#client-id-metadata-documents), which clients should prefer over DCR when the authorization server advertises `client_id_metadata_document_supported`. Dynamic client registration remains available for backwards compatibility with authorization servers that do not support CIMD, and the spec's deprecation policy sets a minimum twelve-month window before removal, so the flow described here keeps working. Against a CIMD-only authorization server that exposes no `registration_endpoint`, supply a pre-registered [`clientId`](#auth) instead.
+</Callout>
 
 ## Setup
 
@@ -38,12 +42,12 @@ The manager is a single resource. Mount it with `useAui` like any other scope. O
 
 ### Mount the manager
 
-Declare your connectors and provide the `mcp` scope on `useAui`. No provider wrapper, no imperative hooks:
+Declare your connectors and provide the `mcp` scope via `AuiProvider`. No imperative hooks:
 
 ```tsx title="app/providers.tsx"
 "use client";
 
-import { AuiProvider, useAui } from "@assistant-ui/react";
+import { AuiConfig, AuiProvider, useAui } from "@assistant-ui/react";
 import { McpManagerResource, defineConnector } from "@assistant-ui/react-mcp";
 
 const connectors = [
@@ -64,13 +68,18 @@ const connectors = [
 ];
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  const aui = useAui({
+  const aui = useAui();
+  const config = AuiConfig({
     mcp: McpManagerResource({
       connectors,
       connectionTimeout: 15_000,
     }),
   });
-  return <AuiProvider value={aui}>{children}</AuiProvider>;
+  return (
+    <AuiProvider extends={aui} config={config}>
+      {children}
+    </AuiProvider>
+  );
 }
 ```
 
@@ -94,7 +103,7 @@ You have two options:
 <InstallCommand shadcn={["mcp-config"]} />
 
 ```tsx title="app/page.tsx"
-import { McpConfigDialog } from "@/components/assistant-ui/mcp-config";
+import { McpConfigDialog } from "@/components/assistant-ui/elements/mcp-config.aui";
 
 export default function Page() {
   return (
@@ -114,7 +123,7 @@ Pass children to override the trigger:
 </McpConfigDialog>
 ```
 
-**Compose your own from primitives** — three namespaces, all unstyled and `data-*`-driven. The iteration primitives take a **render function** so the body re-runs per server with the right scope:
+**Compose your own from primitives.** Four namespaces are available, all unstyled and `data-*`-driven. The iteration primitives take a **render function** so the body re-runs per server with the right scope:
 
 ```tsx title="app/mcp/page.tsx"
 "use client";
@@ -205,19 +214,19 @@ export default function Callback() {
 }
 ```
 
-The callback reads `?state=...&code=...` from the URL, derives the target server id (encoded in the OAuth `state` parameter automatically), and calls `completeAuth` on the right server.
+The callback reads `?state=...` plus either `code` or an OAuth `error` from the URL, derives the target server id (encoded in the OAuth `state` parameter automatically), verifies the complete state value against the pending authorization request, and calls `completeAuth` on the right server.
 
 </Step>
 <Step>
 
 ### That's it — the chat sees your tools
 
-`McpManagerResource` registers connected tools as **frontend tools** with the `modelContext` scope. Any chat runtime mounted in the same store (e.g. `@assistant-ui/react-ai-sdk`'s `useChatRuntime`) sees them and exposes them to the model — no `useMcpTools` hook, no adapter call.
+`McpManagerResource` registers connected tools as **frontend tools** with the `modelContext` scope. Any chat runtime mounted in the same store (e.g. `@assistant-ui/ai-sdk`'s `useChatRuntime`) sees them and exposes them to the model — no `useMcpTools` hook, no adapter call.
 
 ```tsx
 "use client";
 import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
-import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
+import { useChatRuntime } from "@assistant-ui/ai-sdk";
 
 export function Chat() {
   const runtime = useChatRuntime({
@@ -242,21 +251,70 @@ const out = await aui.mcp.server({ id: "linear" }).callTool("search", { q });
 </Step>
 </Steps>
 
+## Form elicitation
+
+Connected servers can request structured user input through form-mode elicitation. Render `McpElicitationPrimitive.Items` inside a server-scoped subtree, then compose fields and response actions from the unstyled primitives:
+
+Answering a request requires composing `McpElicitationPrimitive`, because the server waits for the form response otherwise. Set `elicitation: false` on a connector or custom server to opt it out of advertising the capability. Numeric fields can stay text inputs (parseable strings are coerced); boolean fields must compose a checkbox, because string drafts for booleans are flagged invalid rather than coerced. Clearing a field returns it to the unanswered state, so an empty text input is omitted from the response rather than submitted as `""` or flagged invalid, unless the schema admits `""` for that property through an `enum` member or a `""` default. Render `enum` properties as a select; when `""` is not a member, its blank option is the unanswered state.
+
+```tsx
+import { McpElicitationPrimitive } from "@assistant-ui/react-mcp";
+
+<McpElicitationPrimitive.Items>
+  {() => (
+    <McpElicitationPrimitive.Root>
+      <McpElicitationPrimitive.Message />
+      <McpElicitationPrimitive.Error />
+      <McpElicitationPrimitive.Fields>
+        {({ name, schema, value, setValue }) =>
+          (schema as { type?: string } | undefined)?.type === "boolean" ? (
+            <label>
+              {name}
+              <input
+                type="checkbox"
+                checked={value === true}
+                onChange={(event) => setValue(event.target.checked)}
+              />
+            </label>
+          ) : (
+            <input
+              name={name}
+              value={typeof value === "string" ? value : ""}
+              onChange={(event) => setValue(event.target.value)}
+            />
+          )
+        }
+      </McpElicitationPrimitive.Fields>
+      <McpElicitationPrimitive.Accept>Submit</McpElicitationPrimitive.Accept>
+      <McpElicitationPrimitive.Decline>Decline</McpElicitationPrimitive.Decline>
+      <McpElicitationPrimitive.Cancel>Cancel</McpElicitationPrimitive.Cancel>
+    </McpElicitationPrimitive.Root>
+  )}
+</McpElicitationPrimitive.Items>
+```
+
+Client-side validation errors keep the elicitation pending so the user can correct the form, and `McpElicitationPrimitive.Error` renders the resulting message.
+
 ## Storage
 
-All persisted state — custom server records, OAuth tokens, PKCE verifiers, DCR client info — goes through a single `MCPStorage` resource. Three built-ins:
+All persisted state — custom server records, OAuth tokens, callback state, PKCE verifiers, DCR client info — goes through a single `MCPStorage` resource. Three built-ins:
 
 - `McpLocalStorage()` — default. Stores under the `aui-mcp:` prefix in `window.localStorage`.
 - `McpMemoryStorage()` — in-process Map. Use for SSR/tests where localStorage is absent.
 - `McpCustomStorage({...})` — bring your own load/save. Use for app-controlled backends (e.g. POST to your API).
 
+A storage can declare a `scopeId` — a stable identity for its backing data (two storages sharing a `scopeId` must read and write the same persisted state). Servers with `bearer` or `oauth` auth key their connection on it, so swapping to a differently-scoped storage reconnects and rebinds the OAuth provider instead of leaving a live connection writing auth state to the replaced store. Without a `scopeId`, a storage swap never triggers a reconnect. `McpLocalStorage()` derives one automatically for the shared `window.localStorage` (pass `scopeId` yourself when overriding the backing `storage`); `McpMemoryStorage()` scopes each instance uniquely; `McpCustomStorage` takes whatever identity its backend already has.
+
+Only connections follow the scope. The custom server list is read from storage once when the manager mounts and is not re-read when `storage` changes, so a swap keeps the records loaded from the previous store and persists them into the replacement. Treat a storage as fixed for the life of the manager: when the backing identity really changes (a different signed-in user, for example), remount the manager instead of swapping its `storage`.
+
 ```tsx
 import { McpManagerResource, McpCustomStorage } from "@assistant-ui/react-mcp";
 
-const aui = useAui({
+AuiConfig({
   mcp: McpManagerResource({
     connectors,
     storage: McpCustomStorage({
+      scopeId: "api:/api/mcp",
       loadCustomServers: async () => fetch("/api/mcp/servers").then((r) => r.json()),
       saveCustomServers: async (records) =>
         fetch("/api/mcp/servers", { method: "PUT", body: JSON.stringify(records) }),
@@ -292,7 +350,7 @@ Three modes, declared per-connector or per-custom-record:
 }
 ```
 
-The OAuth provider implements the MCP SDK's `OAuthClientProvider`. The SDK handles discovery (RFC 8414), DCR (RFC 7591), PKCE, token exchange, and refresh; this package mediates `MCPStorage` reads/writes and the redirect step. The server id is embedded in the OAuth `state` parameter so a single `/mcp/callback` route knows which server to complete.
+The OAuth provider implements the MCP SDK's `OAuthClientProvider`. The SDK handles discovery (RFC 8414), DCR (RFC 7591 — [deprecated in favor of CIMD](#how-it-works) but still supported), PKCE, token exchange, and refresh; this package mediates `MCPStorage` reads/writes and the redirect step. The server id is embedded in the OAuth `state` parameter so a single `/mcp/callback` route knows which server to complete.
 
 ## State & methods
 
@@ -346,6 +404,7 @@ What ships:
 
 - Tool listing and invocation, auto-registered as frontend tools
 - Resource listing and reads for app-built browsers or preview panes
+- Form-mode elicitation with app-composed fields and response actions
 - OAuth (PKCE + DCR), bearer, none
 - StreamableHTTP transport
 - Manual connect/disconnect

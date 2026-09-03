@@ -5,20 +5,22 @@ import {
   withKey,
   type ResourceElement,
 } from "@assistant-ui/tap";
+import type { ClientOutput } from "@assistant-ui/store";
 import {
-  useAssistantClientRef,
-  type ClientOutput,
   attachTransformScopes,
-} from "@assistant-ui/store";
+  useAssistantClientRef,
+  useAssistantScopeEffect,
+} from "@assistant-ui/store/client";
 import type { McpAppResourceOutput, ToolsState } from "../types/scopes/tools";
 import type { Tool } from "assistant-stream";
 import {
   isStandaloneToolDisplay,
   makeToolCallTextComponent,
+  type ToolCallText,
   type Toolkit,
 } from "../model-context/toolbox";
 import type { ToolCallMessagePartComponent } from "../types/MessagePartComponentTypes";
-import { ModelContext } from "../../store";
+import { ModelContext } from "../../store/clients/model-context-client";
 
 export type { McpAppResourceOutput };
 
@@ -58,12 +60,16 @@ const useTools = ({
     (
       toolName: string,
       render: ToolCallMessagePartComponent,
-      options?: { standalone?: boolean },
+      options?: {
+        standalone?: boolean;
+        renderText?: ToolCallText<any, any> | undefined;
+      },
     ) => {
       // One registration object per call; identity is the removal key, so
       // the per-name list stays correctly ref-counted across re-registers.
       const registration = {
         render,
+        renderText: options?.renderText,
         standalone: options?.standalone ?? false,
       };
 
@@ -104,43 +110,50 @@ const useTools = ({
         unsubscribes.push(
           setToolUI(toolName, render, {
             standalone: isStandaloneToolDisplay(tool),
+            renderText: toolRenderText,
           }),
         );
       }
     }
 
-    // Register tools with model context (exclude symbols). `render`,
-    // `renderText`, and `display` are client-only presentation concerns and
-    // never reach the model.
-    const toolsWithoutRender = Object.entries(toolkit).reduce(
-      (acc, [name, tool]) => {
-        if (tool.type === "mcp") return acc;
-        const {
-          display: _display,
-          render: _render,
-          renderText: _renderText,
-          ...rest
-        } = tool as typeof tool & { renderText?: unknown };
-        acc[name] = rest as Tool<any, any>;
-        return acc;
-      },
-      {} as Record<string, Tool<any, any>>,
-    );
-
-    const modelContextProvider = {
-      getModelContext: () => ({
-        tools: toolsWithoutRender,
-      }),
-    };
-
-    unsubscribes.push(
-      clientRef.current!.modelContext().register(modelContextProvider),
-    );
-
     return () => {
       unsubscribes.forEach((fn) => fn());
     };
-  }, [toolkit, setToolUI, clientRef]);
+  }, [toolkit, setToolUI]);
+
+  useAssistantScopeEffect(
+    "modelContext",
+    () => {
+      if (!toolkit) return;
+
+      // Register tools with model context (exclude symbols). `render`,
+      // `renderText`, and `display` are client-only presentation concerns and
+      // never reach the model.
+      const toolsWithoutRender = Object.entries(toolkit).reduce(
+        (acc, [name, tool]) => {
+          if (tool.type === "mcp") return acc;
+          const {
+            display: _display,
+            render: _render,
+            renderText: _renderText,
+            ...rest
+          } = tool as typeof tool & { renderText?: unknown };
+          acc[name] = rest as Tool<any, any>;
+          return acc;
+        },
+        {} as Record<string, Tool<any, any>>,
+      );
+
+      const modelContextProvider = {
+        getModelContext: () => ({
+          tools: toolsWithoutRender,
+        }),
+      };
+
+      return clientRef.current!.modelContext().register(modelContextProvider);
+    },
+    [toolkit],
+  );
 
   return {
     getState: () => state,

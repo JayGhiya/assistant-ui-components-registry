@@ -1,5 +1,6 @@
 import { SSEEventDecoder } from "assistant-stream/utils";
 import { contentToParts } from "./contentToParts";
+import { parseAdkEventValue } from "./parseAdkEvent";
 import { trimTrailingSlashes } from "./trimTrailingSlashes";
 import type {
   AdkEvent,
@@ -131,6 +132,17 @@ function validateEventStreamContentType(response: Response): void {
   }
 }
 
+function parseAdkEvent(data: string): AdkEvent {
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    throw new Error("Invalid ADK stream event: expected valid JSON.");
+  }
+
+  return parseAdkEventValue(value, "Invalid ADK stream event");
+}
+
 async function resolveHeaders(
   headers:
     | Record<string, string>
@@ -243,12 +255,22 @@ async function* parseSSEResponse(response: Response): AsyncGenerator<AdkEvent> {
   const decoder = new TextDecoder();
   const sseDecoder = new SSEEventDecoder({ trailing: "dispatch" });
 
+  let shouldCancel = true;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await reader.read();
+      } catch (error) {
+        shouldCancel = false;
+        throw error;
+      }
+
+      const { done, value } = result;
       if (done) {
+        shouldCancel = false;
         for (const event of sseDecoder.push(decoder.decode())) {
-          yield JSON.parse(event.data) as AdkEvent;
+          yield parseAdkEvent(event.data);
         }
         break;
       }
@@ -256,13 +278,17 @@ async function* parseSSEResponse(response: Response): AsyncGenerator<AdkEvent> {
       for (const event of sseDecoder.push(
         decoder.decode(value, { stream: true }),
       )) {
-        yield JSON.parse(event.data) as AdkEvent;
+        yield parseAdkEvent(event.data);
       }
     }
 
     const trailing = sseDecoder.flush();
-    if (trailing !== null) yield JSON.parse(trailing.data) as AdkEvent;
+    if (trailing !== null) yield parseAdkEvent(trailing.data);
   } finally {
-    reader.releaseLock();
+    try {
+      if (shouldCancel) await reader.cancel().catch(() => undefined);
+    } finally {
+      reader.releaseLock();
+    }
   }
 }

@@ -22,6 +22,7 @@ export type {
   GenerativeUINode,
   GenerativeUISpec,
   Unstable_AudioMessagePart,
+  ToolApprovalDisplay,
   ToolApprovalOption,
   ToolApprovalOptionKind,
   ToolApprovalResponse,
@@ -34,6 +35,7 @@ export type {
   ThreadAssistantMessagePart,
   // Message status
   MessagePartStatus,
+  MessagePartStreamStatus,
   ToolCallMessagePartStatus,
   MessageStatus,
   // Thread messages
@@ -49,7 +51,11 @@ export type {
   AppendMessage,
 } from "./types/message";
 
-export { MCP_APP_URI_SCHEME, isMcpAppUri } from "./types/message";
+export {
+  MCP_APP_URI_SCHEME,
+  isMcpAppUri,
+  toolApprovalAcceptsText,
+} from "./types/message";
 
 export type {
   Attachment,
@@ -62,6 +68,12 @@ export type {
 } from "./types/attachment";
 
 export type { Unsubscribe } from "./types/unsubscribe";
+
+export type {
+  Assistant,
+  UserCommands,
+  UserExternalState,
+} from "./types/augmentations";
 
 export type { QuoteInfo } from "./types/quote";
 
@@ -201,6 +213,7 @@ export type {
   AssistantError,
 } from "./types/error";
 export { toAssistantError, isAssistantError } from "./types/error";
+export { MessageNotSentError, isMessageNotSentError } from "./types/error";
 
 export type {
   RuntimeCapabilities,
@@ -325,7 +338,10 @@ export type { ExternalStoreSharedOptions } from "./runtimes/external-store/exter
 export { pickExternalStoreSharedOptions } from "./runtimes/external-store/external-store-shared-options";
 
 // Message queue
-export type { ExternalThreadQueueAdapter } from "./runtime/queue/external-thread-queue-adapter";
+export type {
+  ExternalThreadQueueAdapter,
+  QueuePlacement,
+} from "./runtime/queue/external-thread-queue-adapter";
 export type { ExternalThreadBranchAdapter } from "./runtime/branch/external-thread-branch-adapter";
 export {
   createMessageQueue,
@@ -336,7 +352,9 @@ export {
 // Remote Thread List (user-facing)
 export type {
   RemoteThreadListAdapter,
+  RuntimeAdapters,
   RemoteThreadListOptions,
+  RemoteThreadListProviderComponent,
   RemoteThreadInitializeResponse,
   RemoteThreadMetadata,
   RemoteThreadListResponse,

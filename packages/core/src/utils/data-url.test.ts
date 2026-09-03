@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { httpUrlPattern, parseDataUrl } from "./data-url";
+import {
+  httpUrlPattern,
+  parseDataUrl,
+  resolveFilePartSource,
+} from "./data-url";
 
 describe("parseDataUrl", () => {
   it("parses a base64 data URL", () => {
@@ -27,6 +31,27 @@ describe("parseDataUrl", () => {
     });
   });
 
+  it("parses an uppercase scheme", () => {
+    expect(parseDataUrl("DATA:image/png;base64,aGVsbG8=")).toEqual({
+      mimeType: "image/png",
+      data: "aGVsbG8=",
+    });
+  });
+
+  it("parses a mixed-case scheme and base64 token", () => {
+    expect(parseDataUrl("Data:image/png;Base64,aGVsbG8=")).toEqual({
+      mimeType: "image/png",
+      data: "aGVsbG8=",
+    });
+  });
+
+  it("lowercases the captured mime type", () => {
+    expect(parseDataUrl("data:IMAGE/PNG;base64,aGVsbG8=")).toEqual({
+      mimeType: "image/png",
+      data: "aGVsbG8=",
+    });
+  });
+
   it("returns null for plain strings", () => {
     expect(parseDataUrl("aGVsbG8=")).toBeNull();
   });
@@ -50,4 +75,51 @@ describe("httpUrlPattern", () => {
       expect(httpUrlPattern.test(value)).toBe(false);
     },
   );
+});
+
+describe("resolveFilePartSource", () => {
+  it("uses an explicit url source type for opaque values", () => {
+    expect(
+      resolveFilePartSource({
+        data: "provider-file-id",
+        mimeType: "application/pdf",
+        sourceType: "url",
+      }),
+    ).toEqual({ kind: "url", url: "provider-file-id" });
+  });
+
+  it("uses http URLs as url sources", () => {
+    expect(
+      resolveFilePartSource({
+        data: "https://example.com/file.pdf",
+        mimeType: "application/pdf",
+      }),
+    ).toEqual({ kind: "url", url: "https://example.com/file.pdf" });
+  });
+
+  it("decodes data URLs and uses their media type", () => {
+    expect(
+      resolveFilePartSource({
+        data: "data:image/png;base64,aGVsbG8=",
+        mimeType: "application/octet-stream",
+      }),
+    ).toEqual({
+      kind: "data",
+      data: "aGVsbG8=",
+      mimeType: "image/png",
+    });
+  });
+
+  it("passes through opaque data with its declared media type", () => {
+    expect(
+      resolveFilePartSource({
+        data: "provider-file-id",
+        mimeType: "application/pdf",
+      }),
+    ).toEqual({
+      kind: "data",
+      data: "provider-file-id",
+      mimeType: "application/pdf",
+    });
+  });
 });

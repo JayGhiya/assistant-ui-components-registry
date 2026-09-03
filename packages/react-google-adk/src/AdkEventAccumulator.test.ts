@@ -117,7 +117,7 @@ describe("AdkEventAccumulator - function calls", () => {
     });
   });
 
-  it("generates a UUID for functionCall without an id", () => {
+  it("generates an ID for functionCall without an id", () => {
     const acc = new AdkEventAccumulator();
     const msgs = acc.processEvent(
       makeEvent({
@@ -238,6 +238,156 @@ describe("AdkEventAccumulator - function responses", () => {
       name: "search",
       content: JSON.stringify({ results: [] }),
     });
+  });
+
+  it("skips a user function response that answers no call", () => {
+    const acc = new AdkEventAccumulator();
+    const msgs = acc.processEvent(
+      makeEvent({
+        author: "user",
+        content: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                name: "adk_request_confirmation",
+                response: { confirmed: true },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    // Without an id it answers no call: core drops it as an orphan, and
+    // keeping it would let it settle the confirmation batch it grouped into.
+    expect(msgs.filter((m) => m.type === "tool")).toEqual([]);
+  });
+
+  // A session load replays the stored events through a fresh accumulator.
+  it("gives a tool message the same id on every replay of an event", () => {
+    const event = makeEvent({
+      id: "evt-tool",
+      author: "agent",
+      content: {
+        role: "model",
+        parts: [
+          {
+            functionResponse: {
+              name: "search",
+              id: "tc-1",
+              response: { results: [] },
+            },
+          },
+        ],
+      },
+    });
+
+    const first = new AdkEventAccumulator().processEvent(event);
+    const second = new AdkEventAccumulator().processEvent(event);
+
+    expect(first[0]!.id).toBe(second[0]!.id);
+  });
+
+  it("keeps two tool messages from one event distinct", () => {
+    const msgs = new AdkEventAccumulator().processEvent(
+      makeEvent({
+        id: "evt-tool",
+        author: "agent",
+        content: {
+          role: "model",
+          parts: [
+            {
+              functionResponse: {
+                name: "search",
+                id: "tc-1",
+                response: { a: 1 },
+              },
+            },
+            {
+              functionResponse: {
+                name: "lookup",
+                id: "tc-2",
+                response: { b: 2 },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    const toolMessages = msgs.filter((m) => m.type === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[0]!.id).not.toBe(toolMessages[1]!.id);
+  });
+
+  it("gives an assistant message the same id on every replay", () => {
+    const events = [
+      makeTextEvent("Hel", true),
+      makeTextEvent("lo", true),
+      makeTextEvent("Hello"),
+    ];
+    const replay = () => {
+      const acc = new AdkEventAccumulator();
+      let msgs: AdkMessage[] = [];
+      for (const event of events) msgs = acc.processEvent(event);
+      return msgs;
+    };
+
+    expect(replay().map((m) => m.id)).toEqual(replay().map((m) => m.id));
+  });
+
+  it("keeps two assistant messages opened by one event distinct and stable", () => {
+    const event = makeEvent({
+      id: "evt-mixed",
+      author: "agent",
+      content: {
+        role: "model",
+        parts: [
+          { text: "before" },
+          {
+            functionResponse: {
+              name: "search",
+              id: "tc-1",
+              response: { ok: true },
+            },
+          },
+          { text: "after" },
+        ],
+      },
+    });
+
+    const first = new AdkEventAccumulator().processEvent(event);
+    const second = new AdkEventAccumulator().processEvent(event);
+
+    const aiIds = first.filter((m) => m.type === "ai").map((m) => m.id);
+    expect(aiIds.length).toBeGreaterThan(1);
+    expect(new Set(aiIds).size).toBe(aiIds.length);
+    expect(first.map((m) => m.id)).toEqual(second.map((m) => m.id));
+  });
+
+  it("keeps two tool messages distinct when the payload omits response ids", () => {
+    const event = makeEvent({
+      id: "evt-tool",
+      author: "agent",
+      content: {
+        role: "model",
+        parts: [
+          { functionResponse: { name: "search", response: { a: 1 } } },
+          { functionResponse: { name: "lookup", response: { b: 2 } } },
+        ],
+      },
+    });
+
+    const first = new AdkEventAccumulator()
+      .processEvent(event)
+      .filter((m) => m.type === "tool");
+    const second = new AdkEventAccumulator()
+      .processEvent(event)
+      .filter((m) => m.type === "tool");
+
+    expect(first).toHaveLength(2);
+    expect(first[0]!.id).not.toBe(first[1]!.id);
+    expect(first.map((m) => m.id)).toEqual(second.map((m) => m.id));
   });
 });
 
@@ -964,6 +1114,60 @@ describe("AdkEventAccumulator - user message handling", () => {
     });
   });
 
+  it("creates a tool message for a user-authored function response", () => {
+    const acc = new AdkEventAccumulator();
+    const msgs = acc.processEvent(
+      makeEvent({
+        author: "user",
+        content: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: "tc-1",
+                name: "adk_request_confirmation",
+                response: { confirmed: true },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      type: "tool",
+      tool_call_id: "tc-1",
+      name: "adk_request_confirmation",
+      content: JSON.stringify({ confirmed: true }),
+      status: "success",
+    });
+  });
+
+  it("orders function responses from one user event before its text", () => {
+    const acc = new AdkEventAccumulator();
+    const msgs = acc.processEvent(
+      makeEvent({
+        author: "user",
+        content: {
+          role: "user",
+          parts: [
+            { text: "go ahead" },
+            {
+              functionResponse: {
+                id: "tc-1",
+                name: "adk_request_confirmation",
+                response: { confirmed: true },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]).toMatchObject({ type: "tool", tool_call_id: "tc-1" });
+    expect(msgs[1]).toMatchObject({ type: "human", content: "go ahead" });
+  });
+
   it("creates separate human and AI messages for a user/agent turn", () => {
     const acc = new AdkEventAccumulator();
     acc.processEvent(
@@ -1271,5 +1475,88 @@ describe("AdkEventAccumulator - user message handling", () => {
       type: "ai",
       content: [{ type: "text", text: "What do you need help with?" }],
     });
+  });
+});
+
+describe("AdkEventAccumulator - multiple parts in one event", () => {
+  it("keeps every text part of a single non-partial event in order", () => {
+    const acc = new AdkEventAccumulator();
+    const msgs = acc.processEvent(
+      makeEvent({
+        author: "agent",
+        content: { role: "model", parts: [{ text: "A" }, { text: "B" }] },
+      }),
+    );
+
+    expect(msgs[0]?.content).toEqual([
+      { type: "text", text: "A" },
+      { type: "text", text: "B" },
+    ]);
+  });
+
+  it("preserves the Gemini code-execution shape", () => {
+    const acc = new AdkEventAccumulator();
+    const msgs = acc.processEvent(
+      makeEvent({
+        author: "agent",
+        content: {
+          role: "model",
+          parts: [
+            { text: "Here is the code:" },
+            { executableCode: { code: "print(1)", language: "python" } },
+            { codeExecutionResult: { outcome: "OUTCOME_OK", output: "1" } },
+            { text: "The result is 1." },
+          ],
+        },
+      }),
+    );
+
+    expect(msgs[0]?.content).toEqual([
+      { type: "text", text: "Here is the code:" },
+      { type: "code", code: "print(1)", language: "python" },
+      { type: "code_result", output: "1", outcome: "OUTCOME_OK" },
+      { type: "text", text: "The result is 1." },
+    ]);
+  });
+
+  it("keeps every reasoning part of a single non-partial event", () => {
+    const acc = new AdkEventAccumulator();
+    const msgs = acc.processEvent(
+      makeEvent({
+        author: "agent",
+        content: {
+          role: "model",
+          parts: [
+            { text: "First thought", thought: true },
+            { text: "Second thought", thought: true },
+          ],
+        },
+      }),
+    );
+
+    expect(msgs[0]?.content).toEqual([
+      { type: "reasoning", text: "First thought" },
+      { type: "reasoning", text: "Second thought" },
+    ]);
+  });
+
+  it("still replaces the streamed buffer with the final text", () => {
+    const acc = new AdkEventAccumulator();
+    acc.processEvent(makeTextEvent("Hel", true));
+    acc.processEvent(makeTextEvent("lo", true));
+    const msgs = acc.processEvent(
+      makeEvent({
+        author: "agent",
+        content: {
+          role: "model",
+          parts: [{ text: "Hello" }, { text: "Again" }],
+        },
+      }),
+    );
+
+    expect(msgs[0]?.content).toEqual([
+      { type: "text", text: "Hello" },
+      { type: "text", text: "Again" },
+    ]);
   });
 });

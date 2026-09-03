@@ -389,15 +389,15 @@ Register the renderer with a backend toolkit entry inside `AssistantRuntimeProvi
 ```tsx
 import {
   AssistantRuntimeProvider,
+  AuiConfig,
   defineToolkit,
   Tools,
-  useAui,
 } from "@assistant-ui/react";
 import {
   createAdkStream,
   useAdkRuntime,
 } from "@assistant-ui/react-google-adk";
-import { Thread } from "@/components/assistant-ui/thread";
+import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 
 const toolkit = defineToolkit({
   adk_request_input: {
@@ -410,10 +410,9 @@ function App() {
   const runtime = useAdkRuntime({
     stream: createAdkStream({ api: "/api/chat" }),
   });
-  const aui = useAui({ tools: Tools({ toolkit }) });
-
+  const config = AuiConfig({ tools: Tools({ toolkit }) });
   return (
-    <AssistantRuntimeProvider aui={aui} runtime={runtime}>
+    <AssistantRuntimeProvider runtime={runtime} config={config}>
       <Thread />
     </AssistantRuntimeProvider>
   );
@@ -426,16 +425,16 @@ function App() {
 ```tsx
 import {
   AssistantRuntimeProvider,
+  AuiConfig,
   defineToolkit,
   Tools,
-  useAui,
 } from "@assistant-ui/react-native";
 import {
   createAdkStream,
   useAdkRuntime,
 } from "@assistant-ui/react-google-adk";
 import { View } from "react-native";
-import { Thread } from "@/components/assistant-ui/thread";
+import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:3000";
 
@@ -450,10 +449,9 @@ function App() {
   const runtime = useAdkRuntime({
     stream: createAdkStream({ api: `${API_URL}/api/chat` }),
   });
-  const aui = useAui({ tools: Tools({ toolkit }) });
-
+  const config = AuiConfig({ tools: Tools({ toolkit }) });
   return (
-    <AssistantRuntimeProvider aui={aui} runtime={runtime}>
+    <AssistantRuntimeProvider runtime={runtime} config={config}>
       <View style={{ flex: 1 }}>
         <Thread />
       </View>
@@ -468,9 +466,9 @@ function App() {
 ```tsx
 import {
   AssistantRuntimeProvider,
+  AuiConfig,
   defineToolkit,
   Tools,
-  useAui,
 } from "@assistant-ui/react-ink";
 import {
   createAdkStream,
@@ -490,10 +488,9 @@ function App() {
   const runtime = useAdkRuntime({
     stream: createAdkStream({ api: "http://localhost:3000/api/chat" }),
   });
-  const aui = useAui({ tools: Tools({ toolkit }) });
-
+  const config = AuiConfig({ tools: Tools({ toolkit }) });
   return (
-    <AssistantRuntimeProvider aui={aui} runtime={runtime}>
+    <AssistantRuntimeProvider runtime={runtime} config={config}>
       <Box flexDirection="column">
         <Thread />
       </Box>
@@ -647,6 +644,8 @@ function PendingToolsIndicator() {
 </PlatformTabs>
 
 This hook reports every tool call ADK marked via `long_running_tool_ids`, including HITL interrupts. To respond to a specific HITL type, see [tool confirmations](#tool-confirmations), [auth requests](#auth-requests), or [input requests](#input-requests).
+
+That same set decides which tool calls the client owns. A registered frontend tool's `execute` runs only for a call ADK marked long-running, because ADK resolves every other call itself and yields the call to the client before its own response. Register a tool the client executes as a `LongRunningFunctionTool` on the agent.
 
 ## Per-message metadata
 

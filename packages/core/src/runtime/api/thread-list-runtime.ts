@@ -7,7 +7,10 @@ import {
   SKIP_UPDATE,
   ShallowMemoizeSubject,
 } from "../../subscribable/subscribable";
-import type { ThreadListRuntimeCore } from "../interfaces/thread-list-runtime-core";
+import type {
+  ThreadListRuntimeCore,
+  ThreadListRuntimeEvent,
+} from "../interfaces/thread-list-runtime-core";
 import {
   type ThreadListItemRuntime,
   ThreadListItemRuntimeImpl,
@@ -21,6 +24,7 @@ import {
 } from "./thread-runtime";
 
 const RESOLVED_PROMISE = Promise.resolve();
+const NOOP_UNSUBSCRIBE = () => {};
 
 export type ThreadListState = {
   readonly mainThreadId: string;
@@ -31,7 +35,10 @@ export type ThreadListState = {
   readonly isLoadingMore: boolean;
   readonly hasMore: boolean;
   readonly threadItems: Readonly<
-    Record<string, Omit<ThreadListItemState, "isMain" | "threadId">>
+    Record<
+      string,
+      Omit<ThreadListItemState, "isMain" | "threadId" | "isRunning">
+    >
   >;
 };
 
@@ -54,8 +61,30 @@ export type ThreadListRuntime = {
   ): Promise<void>;
   switchToNewThread(): Promise<void>;
 
+  /**
+   * Observes lifecycle events on every thread this list keeps alive, so an
+   * event that fires while its thread is not selected stays observable. Thread
+   * lists that mount only the main thread never emit; their main thread's
+   * runtime is observed directly.
+   */
+  unstable_subscribeThreadEvents(
+    callback: (event: ThreadListRuntimeEvent) => void,
+  ): Unsubscribe;
+
   getLoadThreadsPromise(): Promise<void>;
   reload(): Promise<void>;
+  /**
+   * Refetches the open thread's remote state, for state that changed out of
+   * band and so never reached the stream. When the runtime declares the
+   * in-place capability (`unstable_refetchThread`), composer drafts survive,
+   * existing messages stay rendered during the refetch, and the promise
+   * settles with the refetch, rejecting if it fails; that runtime also owns
+   * what happens to a run in progress, since this does not stop one. Runtimes
+   * without the capability have their hook remounted instead, which discards
+   * unsent composer input and ends any run, and the promise resolves once the
+   * new runtime attaches. A thread that has not been sent yet is left alone.
+   */
+  reloadMainThread(): Promise<void>;
   loadMore(): Promise<void>;
 };
 
@@ -91,6 +120,7 @@ const getThreadListItemState = (
     lastMessageAt: threadData.lastMessageAt,
     custom: threadData.custom,
     isMain: threadData.id === threadList.mainThreadId,
+    isRunning: threadList.unstable_isThreadRunning?.(threadData.id) ?? false,
   };
 };
 
@@ -98,6 +128,7 @@ export type ThreadListRuntimeCoreBinding = ThreadListRuntimeCore;
 
 export class ThreadListRuntimeImpl implements ThreadListRuntime {
   private _getState;
+  private _stateBinding: LazyMemoizeSubject<ThreadListState, object>;
   private _core: ThreadListRuntimeCoreBinding;
   private _runtimeFactory: new (
     binding: ThreadRuntimeCoreBinding,
@@ -120,6 +151,7 @@ export class ThreadListRuntimeImpl implements ThreadListRuntime {
     });
 
     this._getState = stateBinding.getState.bind(stateBinding);
+    this._stateBinding = stateBinding;
 
     this._mainThreadListItemRuntime = new ThreadListItemRuntimeImpl(
       new ShallowMemoizeSubject({
@@ -153,8 +185,11 @@ export class ThreadListRuntimeImpl implements ThreadListRuntime {
   protected __internal_bindMethods() {
     this.switchToThread = this.switchToThread.bind(this);
     this.switchToNewThread = this.switchToNewThread.bind(this);
+    this.unstable_subscribeThreadEvents =
+      this.unstable_subscribeThreadEvents.bind(this);
     this.getLoadThreadsPromise = this.getLoadThreadsPromise.bind(this);
     this.reload = this.reload.bind(this);
+    this.reloadMainThread = this.reloadMainThread.bind(this);
     this.loadMore = this.loadMore.bind(this);
     this.getState = this.getState.bind(this);
     this.subscribe = this.subscribe.bind(this);
@@ -175,12 +210,24 @@ export class ThreadListRuntimeImpl implements ThreadListRuntime {
     return this._core.switchToNewThread();
   }
 
+  public unstable_subscribeThreadEvents(
+    callback: (event: ThreadListRuntimeEvent) => void,
+  ): Unsubscribe {
+    return (
+      this._core.unstable_subscribeThreadEvents?.(callback) ?? NOOP_UNSUBSCRIBE
+    );
+  }
+
   public getLoadThreadsPromise(): Promise<void> {
     return this._core.getLoadThreadsPromise();
   }
 
   public reload(): Promise<void> {
     return this._core.reload?.() ?? RESOLVED_PROMISE;
+  }
+
+  public reloadMainThread(): Promise<void> {
+    return this._core.reloadMainThread?.() ?? RESOLVED_PROMISE;
   }
 
   public loadMore(): Promise<void> {
@@ -192,7 +239,7 @@ export class ThreadListRuntimeImpl implements ThreadListRuntime {
   }
 
   public subscribe(callback: () => void): Unsubscribe {
-    return this._core.subscribe(callback);
+    return this._stateBinding.subscribe(callback);
   }
 
   private _mainThreadListItemRuntime;

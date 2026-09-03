@@ -1,5 +1,4 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
+import { loadRepoSourceSnapshot } from "@/lib/repo-source";
 import {
   DEMO_DOWNLOAD_MANIFESTS,
   getDemoDownloadManifest,
@@ -16,13 +15,8 @@ import { createZip, type ZipFileMap } from "./zip";
 
 type SourceSnapshot = Record<string, string>;
 
-export async function loadSourceSnapshot(snapshotPath = defaultSnapshotPath()) {
-  const raw = await readFile(snapshotPath, "utf8");
-  return JSON.parse(raw) as SourceSnapshot;
-}
-
 export async function createDemoZip(slug: string) {
-  const snapshot = await loadSourceSnapshot();
+  const snapshot = await loadRepoSourceSnapshot();
   return createZip(createDemoFileMap(slug, snapshot));
 }
 
@@ -51,12 +45,15 @@ export function createDemoFileMap(slug: string, snapshot: SourceSnapshot) {
     "app/page.tsx": pageTsx(manifest),
     "app/api/chat/route.ts": chatRouteTs(),
     "components/runtime/demo-runtime-provider.tsx": runtimeProviderTsx(),
-    "components/assistant-ui/markdown-text.tsx": markdownTextShim(),
-    "components/assistant-ui/shiki-highlighter.tsx": shikiHighlighterShim(),
-    "components/assistant-ui/tool-fallback.tsx": toolFallbackShim(),
-    "components/assistant-ui/tooltip-icon-button.tsx": tooltipIconButtonShim(),
+    "components/assistant-ui/elements/markdown-text.tsx": markdownTextShim(),
+    "components/assistant-ui/elements/shiki-highlighter.aui.tsx":
+      shikiHighlighterShim(),
+    "components/assistant-ui/elements/tool-fallback.aui.tsx":
+      toolFallbackShim(),
+    "components/assistant-ui/elements/tooltip-icon-button.tsx":
+      tooltipIconButtonShim(),
     "components/docs/assistant/docs-model-options.ts": docsModelOptionsShim(),
-    "constants/model.ts": 'export const DEFAULT_MODEL_ID = "gpt-4.1-mini";\n',
+    "lib/model.ts": 'export const DEFAULT_MODEL_ID = "gpt-5.6-luna";\n',
     "public/favicon/icon.svg": faviconSvg(),
     [`components/examples/${manifest.slug}.tsx`]: demoSource,
   };
@@ -84,10 +81,6 @@ export function supportedDemoSlugs() {
   return Object.keys(DEMO_DOWNLOAD_MANIFESTS) as DemoDownloadSlug[];
 }
 
-function defaultSnapshotPath() {
-  return path.join(process.cwd(), "generated", "source-snapshot.json");
-}
-
 function assertSnapshotFile(snapshot: SourceSnapshot, snapshotKey: string) {
   const contents = snapshot[snapshotKey];
   if (typeof contents !== "string") {
@@ -97,20 +90,26 @@ function assertSnapshotFile(snapshot: SourceSnapshot, snapshotKey: string) {
 }
 
 function flattenUiFlavorImports(source: string) {
-  return source.replace(
-    /@\/components\/ui\/(?:radix|base)\//g,
-    "@/components/ui/",
-  );
+  return source
+    .replace(/@\/components\/ui\/(?:radix|base)\//g, "@/components/ui/")
+    .replace(/@\/components\/pages\/docs\//g, "@/components/docs/")
+    .replace(/@\/components\/pages\/examples\//g, "@/components/examples/");
 }
 
 function targetPathForSourceFile(sourceFile: string) {
   if (sourceFile.startsWith("packages/ui/src/")) {
     return sourceFile
       .replace(/^packages\/ui\/src\//, "")
+      .replace(/^components\/react\//, "components/")
       .replace(/^components\/ui\/radix\//, "components/ui/")
-      .replace(/^components\/ui\/base\//, "components/ui/")
-      .replace(/^components\/assistant-ui\//, "components/assistant-ui/")
-      .replace(/^lib\//, "lib/");
+      .replace(/^components\/ui\/base\//, "components/ui/");
+  }
+
+  if (sourceFile.startsWith("apps/docs/components/pages/examples/")) {
+    return sourceFile.replace(
+      /^apps\/docs\/components\/pages\/examples\//,
+      "components/examples/",
+    );
   }
 
   if (sourceFile.startsWith("apps/docs/")) {
@@ -270,11 +269,11 @@ function pageTsx(manifest: DemoDownloadManifest) {
 }
 
 function runtimeProviderTsx() {
-  return `"use client";\n\nimport { AssistantRuntimeProvider } from "@assistant-ui/react";\nimport { AssistantChatTransport, useChatRuntime } from "@assistant-ui/react-ai-sdk";\n\nexport function DemoRuntimeProvider({ children }: { children: React.ReactNode }) {\n  const runtime = useChatRuntime({\n    transport: new AssistantChatTransport({ api: "/api/chat" }),\n  });\n\n  return (\n    <AssistantRuntimeProvider runtime={runtime}>\n      {children}\n    </AssistantRuntimeProvider>\n  );\n}\n`;
+  return `"use client";\n\nimport { AssistantRuntimeProvider } from "@assistant-ui/react";\nimport { AssistantChatTransport, useChatRuntime } from "@assistant-ui/ai-sdk";\n\nexport function DemoRuntimeProvider({ children }: { children: React.ReactNode }) {\n  const runtime = useChatRuntime({\n    transport: new AssistantChatTransport({ api: "/api/chat" }),\n  });\n\n  return (\n    <AssistantRuntimeProvider runtime={runtime}>\n      {children}\n    </AssistantRuntimeProvider>\n  );\n}\n`;
 }
 
 function chatRouteTs() {
-  return `import { openai } from "@ai-sdk/openai";\nimport {\n  convertToModelMessages,\n  createUIMessageStream,\n  createUIMessageStreamResponse,\n  streamText,\n} from "ai";\n\nexport const maxDuration = 30;\n\nexport async function POST(req: Request) {\n  const { messages } = await req.json();\n\n  if (!process.env.OPENAI_API_KEY) {\n    const stream = createUIMessageStream({\n      originalMessages: messages,\n      execute: async ({ writer }) => {\n        const messageId = \`msg-\${crypto.randomUUID()}\`;\n        const textId = "fallback-text";\n\n        writer.write({ type: "start", messageId });\n        writer.write({ type: "start-step" });\n        writer.write({ type: "text-start", id: textId });\n        writer.write({\n          type: "text-delta",\n          id: textId,\n          delta:\n            "This starter is running without OPENAI_API_KEY. Add one to .env.local to enable live AI responses.",\n        });\n        writer.write({ type: "text-end", id: textId });\n        writer.write({ type: "finish-step" });\n        writer.write({ type: "finish" });\n      },\n    });\n\n    return createUIMessageStreamResponse({ stream });\n  }\n\n  const result = streamText({\n    model: openai("gpt-4.1-mini"),\n    messages: await convertToModelMessages(messages),\n  });\n\n  return result.toUIMessageStreamResponse();\n}\n`;
+  return `import { openai } from "@ai-sdk/openai";\nimport {\n  convertToModelMessages,\n  createUIMessageStream,\n  createUIMessageStreamResponse,\n  streamText,\n} from "ai";\n\nexport const maxDuration = 30;\n\nexport async function POST(req: Request) {\n  const { messages } = await req.json();\n\n  if (!process.env.OPENAI_API_KEY) {\n    const stream = createUIMessageStream({\n      originalMessages: messages,\n      execute: async ({ writer }) => {\n        const messageId = \`msg-\${crypto.randomUUID()}\`;\n        const textId = "fallback-text";\n\n        writer.write({ type: "start", messageId });\n        writer.write({ type: "start-step" });\n        writer.write({ type: "text-start", id: textId });\n        writer.write({\n          type: "text-delta",\n          id: textId,\n          delta:\n            "This starter is running without OPENAI_API_KEY. Add one to .env.local to enable live AI responses.",\n        });\n        writer.write({ type: "text-end", id: textId });\n        writer.write({ type: "finish-step" });\n        writer.write({ type: "finish" });\n      },\n    });\n\n    return createUIMessageStreamResponse({ stream });\n  }\n\n  const result = streamText({\n    model: openai("gpt-5.6-luna"),\n    messages: await convertToModelMessages(messages),\n  });\n\n  return result.toUIMessageStreamResponse();\n}\n`;
 }
 
 function markdownTextShim() {
@@ -294,7 +293,7 @@ function tooltipIconButtonShim() {
 }
 
 function docsModelOptionsShim() {
-  return `export function docsModelOptions() {\n  return [\n    { id: "gpt-4.1-mini", name: "GPT-4.1 mini" },\n    { id: "gpt-4.1", name: "GPT-4.1" },\n  ];\n}\n`;
+  return `export function docsModelOptions() {\n  return [\n    { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },\n    { id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },\n  ];\n}\n`;
 }
 
 function faviconSvg() {

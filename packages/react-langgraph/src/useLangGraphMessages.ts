@@ -1,6 +1,14 @@
-import { useState, useCallback, useRef, useMemo } from "react";
-import { v4 as uuidv4 } from "uuid";
+import {
+  useState,
+  useCallback,
+  useEffect,
+  useInsertionEffect,
+  useRef,
+  useMemo,
+} from "react";
+import { generateId } from "@assistant-ui/core";
 import { LangGraphMessageAccumulator } from "./LangGraphMessageAccumulator";
+import { abortableIterable, whenAborted } from "./abortableIterable";
 import {
   type EventType,
   type LangChainMessageTupleEvent,
@@ -20,9 +28,30 @@ import {
   type UIMessage,
 } from "./types";
 import { useAui } from "@assistant-ui/store";
+import { invokeUserCallback } from "@assistant-ui/core/internal";
 import { normalizeLangGraphTupleMessage } from "./normalizeLangGraphTupleMessage";
 
 const DEFAULT_UI_STATE_KEY = "ui";
+
+type LangGraphEventCallbackName =
+  | "onMessageChunk"
+  | "onValues"
+  | "onUpdates"
+  | "onSubgraphValues"
+  | "onSubgraphUpdates"
+  | "onMetadata"
+  | "onInfo"
+  | "onError"
+  | "onSubgraphError"
+  | "onCustomEvent";
+
+const invokeEventCallback = <TArgs extends readonly unknown[]>(
+  name: LangGraphEventCallbackName,
+  callback: ((...args: TArgs) => unknown) | undefined,
+  ...args: TArgs
+): void => {
+  void invokeUserCallback("react-langgraph", name, callback, ...args);
+};
 
 const parseEventType = (
   event: string,
@@ -143,12 +172,7 @@ const DEFAULT_APPEND_MESSAGE = <TMessage>(
   curr: TMessage,
 ) => curr;
 
-export const useLangGraphMessages = <TMessage extends { id?: string }>({
-  stream,
-  appendMessage = DEFAULT_APPEND_MESSAGE,
-  eventHandlers,
-  uiStateKey = DEFAULT_UI_STATE_KEY,
-}: {
+type LangGraphMessagesOptions<TMessage> = {
   stream: LangGraphStreamCallback<TMessage>;
   appendMessage?: (prev: TMessage | undefined, curr: TMessage) => TMessage;
   /**
@@ -169,14 +193,38 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
     onSubgraphError?: OnSubgraphErrorEventCallback;
     onCustomEvent?: OnCustomEventCallback;
   };
-}) => {
+};
+
+type LangGraphMessagesInternalOptions<TMessage> =
+  LangGraphMessagesOptions<TMessage> & {
+    onMessages?: (messages: TMessage[], runConfig: unknown) => void;
+    onInterrupt?: (
+      interrupt: LangGraphInterruptState | undefined,
+      runConfig: unknown,
+    ) => void;
+  };
+
+const useLangGraphMessagesInternal = <TMessage extends { id?: string }>({
+  stream,
+  appendMessage = DEFAULT_APPEND_MESSAGE,
+  onMessages,
+  onInterrupt,
+  eventHandlers,
+  uiStateKey = DEFAULT_UI_STATE_KEY,
+}: LangGraphMessagesInternalOptions<TMessage>) => {
+  const interruptRef = useRef<LangGraphInterruptState | undefined>(undefined);
   const [interrupt, setInterrupt] = useState<
     LangGraphInterruptState | undefined
   >();
   const [messages, _setMessages] = useState<TMessage[]>([]);
   const [values, setValues] = useState<Record<string, unknown> | undefined>();
   const messagesRef = useRef(messages);
-  messagesRef.current = messages;
+  useInsertionEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  useInsertionEffect(() => {
+    interruptRef.current = interrupt;
+  }, [interrupt]);
 
   const setMessagesImmediate = useCallback((msgs: TMessage[]) => {
     messagesRef.current = msgs;
@@ -185,7 +233,13 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
 
   const [uiMessages, _setUIMessages] = useState<UIMessage[]>([]);
   const uiMessagesRef = useRef(uiMessages);
-  uiMessagesRef.current = uiMessages;
+  useInsertionEffect(() => {
+    uiMessagesRef.current = uiMessages;
+  }, [uiMessages]);
+
+  const activeAccumulatorRef = useRef<
+    LangGraphMessageAccumulator<TMessage> | undefined
+  >(undefined);
 
   const setUIMessagesImmediate = useCallback((next: UIMessage[]) => {
     uiMessagesRef.current = next;
@@ -219,65 +273,107 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
     ) => {
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
+      let accumulator: LangGraphMessageAccumulator<TMessage> | undefined;
       try {
         // ensure all messages have an ID
         const newMessagesWithId = newMessages.map((m) =>
-          m.id ? m : { ...m, id: uuidv4() },
+          m.id ? m : { ...m, id: generateId() },
         );
 
-        const accumulator = new LangGraphMessageAccumulator({
+        accumulator = new LangGraphMessageAccumulator({
           initialMessages: messagesRef.current,
           initialUIMessages: uiMessagesRef.current,
           appendMessage,
         });
+        activeAccumulatorRef.current = accumulator;
         setMessagesImmediate(accumulator.addMessages(newMessagesWithId));
 
-        const response = await stream(newMessagesWithId, {
-          ...config,
-          abortSignal: abortController.signal,
-          initialize: async () => {
-            return await aui.threadListItem.initialize();
-          },
-        });
+        // A stream that ignores its abortSignal can park before handing the
+        // iterable over, which strands this the same way parking mid-chunk
+        // strands the loop below.
+        const opened = Promise.resolve(
+          stream(newMessagesWithId, {
+            ...config,
+            abortSignal: abortController.signal,
+            initialize: async () => {
+              return await aui.threadListItem.initialize();
+            },
+          }),
+        );
+        const response = await Promise.race([
+          opened,
+          whenAborted(abortController.signal),
+        ]);
+        if (!response) {
+          // finalize whatever it eventually hands over, without waiting for it
+          void opened
+            .then((late) => late?.[Symbol.asyncIterator]().return?.(undefined))
+            .catch(() => {});
+          return;
+        }
 
         let hasTupleMessageEvents = false;
         let lastValuesMessages: TMessage[] | null = null;
         let lastValuesUIMessages: UIMessage[] | null = null;
-        for await (const chunk of response) {
+        for await (const chunk of abortableIterable(
+          response,
+          abortController.signal,
+        )) {
+          // Holds even when the caller's `stream` ignores its abortSignal.
+          if (abortController.signal.aborted) break;
           const { type: eventType, namespace: eventNamespace } = parseEventType(
             chunk.event,
           );
           switch (eventType) {
             case LangGraphKnownEventTypes.MessagesPartial:
             case LangGraphKnownEventTypes.MessagesComplete:
+              if (!Array.isArray(chunk.data)) {
+                console.warn("Received invalid messages payload:", chunk.data);
+                break;
+              }
+              onMessages?.(chunk.data, config.runConfig);
               setMessagesImmediate(accumulator.addMessages(chunk.data));
               break;
             case LangGraphKnownEventTypes.Updates: {
               if (eventNamespace) {
-                onSubgraphUpdates?.(eventNamespace, chunk.data);
+                invokeEventCallback(
+                  "onSubgraphUpdates",
+                  onSubgraphUpdates,
+                  eventNamespace,
+                  chunk.data,
+                );
               } else {
-                onUpdates?.(chunk.data);
+                invokeEventCallback("onUpdates", onUpdates, chunk.data);
               }
+              if (chunk.data === null || typeof chunk.data !== "object") break;
               const extracted = extractMessagesFromUpdates<TMessage>(
                 chunk.data,
               );
               if (extracted.length > 0) {
+                onMessages?.(extracted, config.runConfig);
                 setMessagesImmediate(accumulator.addMessages(extracted));
               }
               // A subgraph update may set an interrupt but never clear one; the parent's top-level update clears it when the subgraph ends.
               const updateInterrupt = chunk.data.__interrupt__?.[0];
               if (!eventNamespace || updateInterrupt !== undefined) {
+                onInterrupt?.(updateInterrupt, config.runConfig);
                 setInterrupt(updateInterrupt);
               }
               break;
             }
             case LangGraphKnownEventTypes.Values:
               if (eventNamespace) {
-                onSubgraphValues?.(eventNamespace, chunk.data);
+                invokeEventCallback(
+                  "onSubgraphValues",
+                  onSubgraphValues,
+                  eventNamespace,
+                  chunk.data,
+                );
                 break;
               }
-              setValues(chunk.data as Record<string, unknown>);
-              onValues?.(chunk.data);
+              invokeEventCallback("onValues", onValues, chunk.data);
+              if (chunk.data === null || typeof chunk.data !== "object") break;
+              setValues(chunk.data);
               if (Array.isArray(chunk.data?.messages)) {
                 lastValuesMessages = chunk.data.messages;
                 if (hasTupleMessageEvents) {
@@ -286,9 +382,11 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
                     accumulator,
                   );
                   if (newMessages.length > 0) {
+                    onMessages?.(newMessages, config.runConfig);
                     setMessagesImmediate(accumulator.addMessages(newMessages));
                   }
                 } else {
+                  onMessages?.(chunk.data.messages, config.runConfig);
                   setMessagesImmediate(
                     accumulator.replaceMessages(chunk.data.messages),
                   );
@@ -304,19 +402,20 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
               }
               break;
             case LangGraphKnownEventTypes.Messages: {
-              hasTupleMessageEvents = true;
-              const [tupleMessage, tupleMetadata] = (
-                chunk as LangChainMessageTupleEvent
-              ).data;
+              const tupleData = (chunk as LangChainMessageTupleEvent).data;
+              const [tupleMessage, tupleMetadata] = Array.isArray(tupleData)
+                ? tupleData
+                : [];
               const normalizedTupleMessage =
                 normalizeLangGraphTupleMessage(tupleMessage);
               if (!normalizedTupleMessage) {
                 console.warn(
                   "Received invalid messages tuple format:",
-                  tupleMessage,
+                  tupleData,
                 );
                 break;
               }
+              hasTupleMessageEvents = true;
 
               const tupleMetadataWithNamespace:
                 | LangGraphTupleMetadata
@@ -329,7 +428,9 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
                   : undefined;
 
               if (normalizedTupleMessage.kind === "chunk") {
-                onMessageChunk?.(
+                invokeEventCallback(
+                  "onMessageChunk",
+                  onMessageChunk,
                   normalizedTupleMessage.message,
                   tupleMetadataWithNamespace ?? {},
                 );
@@ -344,18 +445,19 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
                   )
                 : accumulator.addMessages([normalizedMessage]);
 
+              onMessages?.([normalizedMessage], config.runConfig);
               setMessagesImmediate(updatedMessages);
               setMessageMetadata(new Map(accumulator.getMetadataMap()));
               break;
             }
             case LangGraphKnownEventTypes.Metadata:
-              onMetadata?.(chunk.data);
+              invokeEventCallback("onMetadata", onMetadata, chunk.data);
               break;
             case LangGraphKnownEventTypes.Info:
-              onInfo?.(chunk.data);
+              invokeEventCallback("onInfo", onInfo, chunk.data);
               break;
             case LangGraphKnownEventTypes.Error: {
-              onError?.(chunk.data);
+              invokeEventCallback("onError", onError, chunk.data);
               // namespaced errors come from subgraphs, which the parent may recover from
               if (!eventNamespace) {
                 const messages = accumulator.getMessages();
@@ -375,7 +477,12 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
                   setMessagesImmediate(accumulator.addMessages([errorMessage]));
                 }
               } else {
-                onSubgraphError?.(eventNamespace, chunk.data);
+                invokeEventCallback(
+                  "onSubgraphError",
+                  onSubgraphError,
+                  eventNamespace,
+                  chunk.data,
+                );
               }
               break;
             }
@@ -386,7 +493,12 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
                 break;
               }
               if (onCustomEvent) {
-                onCustomEvent(eventType, chunk.data);
+                invokeEventCallback(
+                  "onCustomEvent",
+                  onCustomEvent,
+                  eventType,
+                  chunk.data,
+                );
               } else {
                 console.warn(
                   "Unhandled event received:",
@@ -424,6 +536,9 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
         if (abortControllerRef.current === abortController) {
           abortControllerRef.current = null;
         }
+        if (activeAccumulatorRef.current === accumulator) {
+          activeAccumulatorRef.current = undefined;
+        }
         onComplete?.();
       }
     },
@@ -434,6 +549,8 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
       appendMessage,
       stream,
       uiStateKey,
+      onMessages,
+      onInterrupt,
       onMessageChunk,
       onValues,
       onUpdates,
@@ -447,11 +564,119 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
     ],
   );
 
+  // Merge a load that started before the current run into what that run has
+  // produced since. Anything the run touched is fresher than the snapshot, so
+  // it wins on an id collision and keeps its position; the snapshot only
+  // contributes history the run has never seen.
+  const reconcileMessages = useCallback(
+    (
+      serverMessages: TMessage[],
+      messagesAtLoadStart: TMessage[],
+      { snapshotIsComplete = true }: { snapshotIsComplete?: boolean } = {},
+    ) => {
+      const accumulator = activeAccumulatorRef.current;
+      const currentMessages = accumulator?.getMessages() ?? messagesRef.current;
+      const baselineIds = new Set(
+        messagesAtLoadStart
+          .map((message) => message.id)
+          .filter((id): id is string => id !== undefined),
+      );
+      const baselineMessages = new Set(messagesAtLoadStart);
+      const serverById = new Map(
+        serverMessages
+          .filter((message) => message.id !== undefined)
+          .map((message) => [message.id as string, message]),
+      );
+      const liveIds = new Set(
+        currentMessages
+          .map((message) => message.id)
+          .filter((id): id is string => id !== undefined),
+      );
+      const isRunTouched = (message: TMessage) =>
+        message.id !== undefined
+          ? !baselineIds.has(message.id) || !baselineMessages.has(message)
+          : !baselineMessages.has(message);
+
+      const nextMessages = [
+        ...serverMessages.filter(
+          (message) => message.id === undefined || !liveIds.has(message.id),
+        ),
+        ...currentMessages.flatMap((message) => {
+          if (isRunTouched(message)) return [message];
+          if (message.id !== undefined && serverById.has(message.id))
+            return [serverById.get(message.id) as TMessage];
+          // Absence is a deletion only when the snapshot is the whole thread.
+          return snapshotIsComplete ? [] : [message];
+        }),
+      ];
+      setMessagesImmediate(
+        accumulator?.replaceMessages(nextMessages) ?? nextMessages,
+      );
+      // replaceMessages rebuilds the metadata map, so republish it the way the
+      // other accumulator mutations in this file do.
+      if (accumulator)
+        setMessageMetadata(new Map(accumulator.getMetadataMap()));
+    },
+    [setMessagesImmediate],
+  );
+
+  // Same load boundary as the messages: a snapshot taken before the run
+  // started cannot speak for an interrupt that run has since raised.
+  const reconcileInterrupt = useCallback(
+    (
+      serverInterrupt: LangGraphInterruptState | undefined,
+      interruptAtLoadStart: LangGraphInterruptState | undefined,
+    ) => {
+      if (interruptRef.current !== interruptAtLoadStart) return;
+      if (serverInterrupt === undefined) onInterrupt?.(undefined, undefined);
+      setInterrupt(serverInterrupt);
+    },
+    [onInterrupt],
+  );
+
+  const reconcileUIMessages = useCallback(
+    (
+      serverMessages: UIMessage[],
+      messagesAtLoadStart: UIMessage[],
+      { snapshotIsComplete = true }: { snapshotIsComplete?: boolean } = {},
+    ) => {
+      const accumulator = activeAccumulatorRef.current;
+      const currentMessages =
+        accumulator?.getUIMessages() ?? uiMessagesRef.current;
+      const baselineIds = new Set(
+        messagesAtLoadStart.map((message) => message.id),
+      );
+      const baselineMessages = new Set(messagesAtLoadStart);
+      const serverById = new Map(
+        serverMessages.map((message) => [message.id, message]),
+      );
+      const liveIds = new Set(currentMessages.map((message) => message.id));
+
+      const nextMessages = [
+        ...serverMessages.filter((message) => !liveIds.has(message.id)),
+        ...currentMessages.flatMap((message) => {
+          const runTouched =
+            !baselineIds.has(message.id) || !baselineMessages.has(message);
+          if (runTouched) return [message];
+          const fromServer = serverById.get(message.id);
+          if (fromServer) return [fromServer];
+          return snapshotIsComplete ? [] : [message];
+        }),
+      ];
+      setUIMessagesImmediate(
+        accumulator?.replaceUIMessages(nextMessages) ?? nextMessages,
+      );
+    },
+    [setUIMessagesImmediate],
+  );
+
   const cancel = useCallback(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
   }, []);
+
+  useEffect(() => cancel, [cancel]);
 
   return {
     interrupt,
@@ -465,5 +690,39 @@ export const useLangGraphMessages = <TMessage extends { id?: string }>({
     setValues,
     setMessages: setMessagesImmediate,
     setUIMessages: setUIMessagesImmediate,
+    reconcileMessages,
+    reconcileUIMessages,
+    reconcileInterrupt,
   };
 };
+
+export const useLangGraphMessages = <TMessage extends { id?: string }>({
+  stream,
+  appendMessage,
+  eventHandlers,
+  uiStateKey,
+}: {
+  stream: LangGraphStreamCallback<TMessage>;
+  appendMessage?: (prev: TMessage | undefined, curr: TMessage) => TMessage;
+  uiStateKey?: string;
+  eventHandlers?: {
+    onMessageChunk?: OnMessageChunkCallback;
+    onValues?: OnValuesEventCallback;
+    onUpdates?: OnUpdatesEventCallback;
+    onSubgraphValues?: OnSubgraphValuesEventCallback;
+    onSubgraphUpdates?: OnSubgraphUpdatesEventCallback;
+    onMetadata?: OnMetadataEventCallback;
+    onInfo?: OnInfoEventCallback;
+    onError?: OnErrorEventCallback;
+    onSubgraphError?: OnSubgraphErrorEventCallback;
+    onCustomEvent?: OnCustomEventCallback;
+  };
+}) =>
+  useLangGraphMessagesInternal({
+    stream,
+    ...(appendMessage !== undefined && { appendMessage }),
+    ...(eventHandlers !== undefined && { eventHandlers }),
+    ...(uiStateKey !== undefined && { uiStateKey }),
+  });
+
+export { useLangGraphMessagesInternal };

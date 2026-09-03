@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantCloudAPI, CloudAPIError } from "../AssistantCloudAPI";
+import { CloudResponseError } from "../cloudResponse";
 
 describe("AssistantCloudAPI", () => {
   beforeEach(() => {
@@ -118,6 +119,30 @@ describe("AssistantCloudAPI", () => {
     await expect(api.initializeAuth()).resolves.toBe(false);
   });
 
+  it("rejects initializeAuth with context for malformed anonymous responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          access_token: 123,
+          refresh_token: null,
+        }),
+      }),
+    );
+
+    const api = new AssistantCloudAPI({
+      baseUrl: "https://test.example.com",
+      anonymous: true,
+    });
+
+    await expect(api.initializeAuth()).rejects.toThrow(
+      new CloudResponseError(
+        'Invalid Assistant Cloud response for "anonymous auth token response.access_token": expected a string',
+      ),
+    );
+  });
+
   it("throws APIError with parsed message for JSON error responses", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
@@ -142,6 +167,31 @@ describe("AssistantCloudAPI", () => {
     expect(error.name).toBe("CloudAPIError");
     expect(error.message).toBe("invalid request payload");
     expect(error.status).toBe(400);
+  });
+
+  it("falls back to the response text when the JSON error body has no message", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: new Headers(),
+      text: vi
+        .fn()
+        .mockResolvedValue(JSON.stringify({ error: "rate limited" })),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new AssistantCloudAPI({
+      apiKey: "test-key",
+      userId: "u-1",
+      workspaceId: "w-1",
+    });
+
+    const error = await api.makeRawRequest("/threads").catch((e) => e);
+    expect(error).toBeInstanceOf(CloudAPIError);
+    expect(error.message).toBe(
+      'Request failed with status 429, {"error":"rate limited"}',
+    );
+    expect(error.status).toBe(429);
   });
 
   it("throws generic error with status for non-JSON error responses", async () => {

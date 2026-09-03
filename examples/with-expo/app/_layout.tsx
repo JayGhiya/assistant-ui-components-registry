@@ -14,6 +14,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 
 import {
   AssistantRuntimeProvider,
+  AuiConfig,
   useAui,
   Tools,
 } from "@assistant-ui/react-native";
@@ -22,7 +23,7 @@ import { useTheme } from "@/hooks/use-theme";
 import { Icon } from "@/components/ui/icon";
 import { ThreadListDrawer } from "@/components/thread-list/ThreadListDrawer";
 import { haptics } from "@/lib/haptics";
-import toolkit from "@/components/assistant-ui/tools";
+import toolkit from "@/components/assistant-ui/elements/tools";
 
 function NewChatButton() {
   const aui = useAui();
@@ -31,6 +32,7 @@ function NewChatButton() {
   return (
     <Pressable
       accessibilityLabel="New chat"
+      accessibilityRole="button"
       hitSlop={8}
       onPress={() => {
         haptics.selection();
@@ -87,7 +89,7 @@ export default function RootLayout() {
     Platform.OS === "ios" ? {} : MaterialIcons.font,
   );
   const runtime = useAppRuntime();
-  const aui = useAui({
+  const config = AuiConfig({
     tools: Tools({ toolkit }),
   });
 
@@ -95,7 +97,7 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <AssistantRuntimeProvider runtime={runtime} aui={aui}>
+      <AssistantRuntimeProvider runtime={runtime} config={config}>
         <DrawerLayout />
       </AssistantRuntimeProvider>
     </GestureHandlerRootView>

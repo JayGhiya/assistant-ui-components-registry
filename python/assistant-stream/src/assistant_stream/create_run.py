@@ -5,6 +5,7 @@ from assistant_stream.assistant_stream_chunk import (
     AssistantStreamChunk,
     TextDeltaChunk,
     ReasoningDeltaChunk,
+    ReasoningPartStartChunk,
     ToolResultChunk,
     DataChunk,
     ErrorChunk,
@@ -20,6 +21,7 @@ from assistant_stream.modules.tool_call import (
     ToolCallController,
     generate_openai_style_tool_call_id,
 )
+from assistant_stream.queue_stream import enqueue_threadsafe, queue_stream
 from assistant_stream.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,17 @@ class RunController:
         chunk = TextDeltaChunk(text_delta=text_delta, parent_id=self._parent_id)
         self._flush_and_put_chunk(chunk)
 
+    def add_reasoning_part(self, unstable_summary: str) -> None:
+        """Open a reasoning part carrying an app-authored summary.
+
+        Reasoning parts are otherwise implied by their deltas, so a summary is
+        the only thing this opens a part for.
+        """
+        chunk = ReasoningPartStartChunk(
+            unstable_summary=unstable_summary, parent_id=self._parent_id
+        )
+        self._flush_and_put_chunk(chunk)
+
     def append_reasoning(self, reasoning_delta: str) -> None:
         """Append a reasoning delta to the stream."""
         chunk = ReasoningDeltaChunk(reasoning_delta=reasoning_delta, parent_id=self._parent_id)
@@ -75,6 +88,10 @@ class RunController:
     ) -> None:
         """Append a text delta at a state path using an append-text operation."""
         self._state_manager.append_text(path, text_delta)
+
+    def flush(self) -> None:
+        """Emit buffered state operations ahead of any subsequent stream chunk."""
+        self._state_manager.flush()
 
     async def add_tool_call(
         self, tool_name: str, tool_call_id: str = None
@@ -167,7 +184,7 @@ class RunController:
 
         This is used as a callback for the StateManager.
         """
-        self._loop.call_soon_threadsafe(self._queue.put_nowait, chunk)
+        enqueue_threadsafe(self._loop, self._queue, chunk)
 
     def _flush_and_put_chunk(self, chunk):
         """Helper method to flush state operations and put a chunk in the queue.
@@ -177,7 +194,7 @@ class RunController:
         # Flush any pending state operations first
         self._state_manager.flush()
         # Add the chunk to the queue
-        self._loop.call_soon_threadsafe(self._queue.put_nowait, chunk)
+        enqueue_threadsafe(self._loop, self._queue, chunk)
 
     @property
     def state(self):
@@ -252,19 +269,15 @@ async def create_run(
                 for task in controller._stream_tasks:
                     await task
             finally:
-                asyncio.get_running_loop().call_soon_threadsafe(queue.put_nowait, None)
+                enqueue_threadsafe(asyncio.get_running_loop(), queue, None)
 
     task = asyncio.create_task(background_task())
     ended_normally = False
 
     try:
-        while True:
-            chunk = await controller._queue.get()
-            if chunk is None:
-                ended_normally = True
-                break
+        async for chunk in queue_stream(controller._queue):
             yield chunk
-            controller._queue.task_done()
+        ended_normally = True
     finally:
         if ended_normally:
             # The `None` sentinel is queued at the end of `background_task`, so

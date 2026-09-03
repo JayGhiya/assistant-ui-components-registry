@@ -125,6 +125,7 @@ export type OpenCodeThreadState = {
   runState: OpenCodeRunState;
   messageOrder: readonly string[];
   messagesById: Readonly<Record<string, OpenCodeServerMessage>>;
+  childSessionsById: Readonly<Record<string, OpenCodeThreadState>>;
   pendingUserMessages: Readonly<Record<string, PendingUserMessage>>;
   interactions: {
     permissions: {
@@ -202,7 +203,7 @@ export type OpenCodeRuntimeOptions = ExternalStoreSharedOptions & {
       }
     | undefined;
   defaultAgent?: string | undefined;
-  onError?: (error: unknown) => void;
+  onError?: (error: unknown) => void | Promise<void>;
   adapters?:
     | {
         attachments?: AttachmentAdapter;

@@ -2,10 +2,10 @@
 
 import {
   AssistantRuntimeProvider,
+  AuiConfig,
   Tools,
   type AssistantTransportConnectionMetadata,
   unstable_createMessageConverter as createMessageConverter,
-  useAui,
   useAssistantTransportRuntime,
 } from "@assistant-ui/react";
 import {
@@ -64,6 +64,7 @@ export function MyRuntimeProvider({ children }: MyRuntimeProviderProps) {
     initialState: {
       messages: [],
     },
+    protocol: "assistant-transport",
     api: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8010/assistant",
     converter,
     headers: async () => ({
@@ -89,12 +90,12 @@ export function MyRuntimeProvider({ children }: MyRuntimeProviderProps) {
       console.log("Request cancelled");
     },
   });
-  const aui = useAui({
+  const config = AuiConfig({
     tools: Tools({ toolkit }),
   });
 
   return (
-    <AssistantRuntimeProvider aui={aui} runtime={runtime}>
+    <AssistantRuntimeProvider config={config} runtime={runtime}>
       {children}
     </AssistantRuntimeProvider>
   );

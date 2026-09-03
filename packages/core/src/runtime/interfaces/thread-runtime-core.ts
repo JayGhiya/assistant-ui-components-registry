@@ -16,13 +16,16 @@ import type {
   EditComposerRuntimeCore,
   ThreadComposerRuntimeCore,
 } from "./composer-runtime-core";
-import type { QueueItemState } from "../../store/scopes/queue-item";
+import type { QueueItemState } from "../queue/queue-item";
+import type { QueuePlacement } from "../queue/external-thread-queue-adapter";
 
 export type RuntimeCapabilities = {
   readonly switchToBranch: boolean;
   readonly switchBranchDuringRun: boolean;
   readonly edit: boolean;
   readonly reload: boolean;
+  /** Whether the runtime can refetch this thread's remote state in place. */
+  readonly refetchThread: boolean;
   readonly delete: boolean;
   readonly cancel: boolean;
   readonly unstable_copy: boolean;
@@ -60,6 +63,8 @@ export type RespondToToolApprovalOptions = {
   approved: boolean;
   /** The approval option that produced this decision, when the request carried options. */
   optionId?: string;
+  /** The free-form answer, when the request asked for one. */
+  text?: string;
   reason?: string;
 };
 
@@ -69,6 +74,11 @@ export type SubmitFeedbackOptions = {
 };
 
 export type ThreadSuggestion = {
+  /** Display heading for the suggestion. Falls back to the prompt when absent. */
+  title?: string;
+  /** Secondary display text shown alongside the title. */
+  label?: string;
+  /** The message text sent when the suggestion is selected. */
   prompt: string;
 };
 
@@ -153,10 +163,25 @@ export type ThreadRuntimeCore = Readonly<{
   startRun: (config: StartRunConfig) => void;
   resumeRun: (config: ResumeRunConfig) => void;
   cancelRun: () => void;
+  unstable_notifySessionReset: () => void;
 
   addToolResult: (options: AddToolResultOptions) => void;
   resumeToolCall: (options: ResumeToolCallOptions) => void;
-  respondToToolApproval: (options: RespondToToolApprovalOptions) => void;
+  /**
+   * Records a decision on a tool approval gate. Resolves once the runtime has
+   * accepted the response and rejects when it could not be recorded, so a
+   * caller can leave the gate retryable rather than spending it. A capability
+   * or state precondition still throws synchronously; a failure to record
+   * arrives as a rejection, including one an adapter raises synchronously.
+   *
+   * Acceptance is as far as the runtime can see the response: one that records
+   * the decision locally settles on the record, while one that answers by
+   * resuming a run settles on the resume. A failure of the work the decision
+   * unblocks is reported through the runtime's own error channel, not here.
+   */
+  respondToToolApproval: (
+    options: RespondToToolApprovalOptions,
+  ) => Promise<void>;
 
   speak: (messageId: string) => void;
   stopSpeaking: () => void;
@@ -175,7 +200,8 @@ export type ThreadRuntimeCore = Readonly<{
   beginEdit: (messageId: string) => void;
 
   getQueueItems?: () => readonly QueueItemState[];
-  steerQueueItem?: (queueItemId: string) => void;
+  getSteerQueueItems?: () => readonly QueueItemState[];
+  moveQueueItem?: (queueItemId: string, placement: QueuePlacement) => void;
   removeQueueItem?: (queueItemId: string) => void;
 
   speech: SpeechState | undefined;
@@ -215,6 +241,19 @@ export type ThreadRuntimeCore = Readonly<{
   importExternalState(state: any): void;
 
   reset(initialMessages?: readonly ThreadMessageLike[]): void;
+
+  /**
+   * Re-fetches this thread's state from its backing store, in place: no
+   * runtime-hook remount, so runtime identity and composer drafts survive.
+   * Presence signals the capability to `threads.reloadMainThread()`, which
+   * calls this and propagates its rejection. It does not touch a run in
+   * progress first, because stopping one is `cancelRun`, whose contract is
+   * that the user abandoned a send: it returns the trailing user message to
+   * the composer. An implementation is therefore responsible for whatever
+   * coordination a concurrent run needs. Runtimes without remote state leave
+   * it undefined.
+   */
+  unstable_refetchThread?: (() => Promise<void>) | undefined;
 
   /**
    * @deprecated This API is still under active development and might change without notice.

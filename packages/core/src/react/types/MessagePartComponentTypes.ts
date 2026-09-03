@@ -44,8 +44,16 @@ export type ImageMessagePartComponent = ComponentType<ImageMessagePartProps>;
 export type FileMessagePartProps = MessagePartState & FileMessagePart;
 export type FileMessagePartComponent = ComponentType<FileMessagePartProps>;
 
+/**
+ * @deprecated Use {@link FileMessagePartProps} and render `audio/*` mime types
+ * from the `File` slot.
+ */
 export type Unstable_AudioMessagePartProps = MessagePartState &
   Unstable_AudioMessagePart;
+/**
+ * @deprecated Use {@link FileMessagePartComponent} and render `audio/*` mime
+ * types from the `File` slot.
+ */
 export type Unstable_AudioMessagePartComponent =
   ComponentType<Unstable_AudioMessagePartProps>;
 
@@ -75,10 +83,14 @@ export type ToolCallMessagePartProps<
     /**
      * Responds to a server-side tool approval gate. Only valid while
      * `approval` is set on the part, `approval.approved === undefined`, and
-     * no `approval.resolution` is recorded. Accepts a boolean decision or the
-     * id of one of `approval.options`; option kinds resolve to the boolean.
+     * no `approval.resolution` is recorded. Accepts a boolean decision, the
+     * id of one of `approval.options` (option kinds resolve to the boolean),
+     * or a free-form answer when the request accepts one.
+     *
+     * Resolves once the runtime has accepted the response, and rejects when
+     * it could not be recorded, so the controls can stay retryable.
      */
-    respondToApproval: (response: ToolApprovalResponse) => void;
+    respondToApproval: (response: ToolApprovalResponse) => Promise<void>;
   };
 
 /** Component used to render a tool-call message part. */

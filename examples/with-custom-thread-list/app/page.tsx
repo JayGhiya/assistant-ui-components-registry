@@ -1,7 +1,8 @@
 "use client";
 
-import { Thread } from "@/components/assistant-ui/thread";
+import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import {
+  AuiConfig,
   AuiProvider,
   Suggestions,
   ThreadListItemPrimitive,
@@ -32,7 +33,8 @@ function ThreadList() {
 }
 
 function ThreadWithSuggestions() {
-  const aui = useAui({
+  const aui = useAui();
+  const config = AuiConfig({
     suggestions: Suggestions([
       {
         title: "Start a new topic",
@@ -47,7 +49,7 @@ function ThreadWithSuggestions() {
     ]),
   });
   return (
-    <AuiProvider value={aui}>
+    <AuiProvider extends={aui} config={config}>
       <Thread />
     </AuiProvider>
   );

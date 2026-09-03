@@ -2,12 +2,13 @@
 
 import { Fragment, type FC, type ReactNode, useMemo } from "react";
 import { useAuiState } from "@assistant-ui/store";
-import { useShallow } from "zustand/shallow";
+import { useShallowSelector } from "@assistant-ui/store/internal";
 import type { PartState } from "../../../store/scopes/part";
 import type {
   MessagePartStatus,
   ToolCallMessagePartStatus,
 } from "../../../types/message";
+import { getGroupStatus } from "../../../utils/getGroupStatus";
 import {
   buildGroupTree,
   GROUPBY_MEMO_KEY,
@@ -21,7 +22,8 @@ export namespace MessagePrimitiveGroupedParts {
    * A coalesced group of adjacent parts. Surfaced through the same
    * `{ part }` channel as a leaf {@link EnrichedPartState} so consumers
    * dispatch on a single `switch (part.type)`. `type` is the group key
-   * (always `"group-…"`); `status` mirrors the last contained part.
+   * (always `"group-…"`); `status` is running when any contained part runs,
+   * otherwise it mirrors the last contained part.
    */
   export type GroupPart<TKey extends `group-${string}` = `group-${string}`> = {
     readonly type: TKey;
@@ -133,8 +135,6 @@ export namespace MessagePrimitiveGroupedParts {
   };
 }
 
-const COMPLETE_STATUS: MessagePartStatus = Object.freeze({ type: "complete" });
-
 const shouldShowIndicator = (
   mode: MessagePrimitiveGroupedParts.IndicatorMode,
   parts: readonly PartState[],
@@ -194,7 +194,7 @@ const renderNode = <TKey extends `group-${string}`>(
     );
   }
 
-  const status = parts[node.indices.at(-1)!]?.status ?? COMPLETE_STATUS;
+  const status = getGroupStatus(parts, node.indices);
   const groupPart: MessagePrimitiveGroupedParts.GroupPart<TKey> = {
     type: node.key as TKey,
     status,
@@ -251,7 +251,7 @@ export const MessagePrimitiveGroupedParts = <TKey extends `group-${string}`>({
   indicator = "no-text",
   children,
 }: MessagePrimitiveGroupedParts.Props<TKey>): ReactNode => {
-  const parts = useAuiState(useShallow((s) => s.message.parts));
+  const parts = useAuiState(useShallowSelector((s) => s.message.parts));
   // Handed to `groupBy` as its `context` argument (see GroupByContext).
   const toolUIs = useAuiState((s) => s.tools.toolUIs);
   // Subscribe to a boolean, not the status object: the tree only needs to

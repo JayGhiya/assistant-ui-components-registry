@@ -1,5 +1,37 @@
 # @assistant-ui/react-streamdown
 
+## 0.3.12
+
+### Patch Changes
+
+- [#6305](https://github.com/assistant-ui/assistant-ui/pull/6305) [`e96d3de`](https://github.com/assistant-ui/assistant-ui/commit/e96d3dea9370159e04f82bf4eb39d6b1b1c4d21d) - chore: update dependencies ([@okisdev](https://github.com/okisdev))
+
+- [#6449](https://github.com/assistant-ui/assistant-ui/pull/6449) [`e818d4a`](https://github.com/assistant-ui/assistant-ui/commit/e818d4a8e84d671172545cc03048a3c4f5c9cd64) - refactor: single-source the code-fence contract on a react-markdown subpath. the CodeHeader/SyntaxHighlighter prop types, the by-language override entry, and the language-class parser now live in @assistant-ui/react-markdown/code-fence; react-streamdown re-exports the types from there instead of keeping structurally compatible copies. @types/hast moves to dependencies in both packages so the published declarations reference hast by name instead of a broken store-relative path. ([@okisdev](https://github.com/okisdev))
+
+- [#6330](https://github.com/assistant-ui/assistant-ui/pull/6330) [`3d4fa54`](https://github.com/assistant-ui/assistant-ui/commit/3d4fa549895190624009fe32254d6f459eb79f78) - fix: bump streamdown to 2.6 so fenced code updates when streamed content changes ([@okisdev](https://github.com/okisdev))
+- Updated dependencies [[`6dcd69f`](https://github.com/assistant-ui/assistant-ui/commit/6dcd69f8f743b156e4733dcc2d4819c6f7891804), [`0fa835c`](https://github.com/assistant-ui/assistant-ui/commit/0fa835cf4abc38eddcb2e6fa998a8c14b3299f50), [`e96d3de`](https://github.com/assistant-ui/assistant-ui/commit/e96d3dea9370159e04f82bf4eb39d6b1b1c4d21d), [`e818d4a`](https://github.com/assistant-ui/assistant-ui/commit/e818d4a8e84d671172545cc03048a3c4f5c9cd64)]:
+  - @assistant-ui/react-markdown@0.14.13
+
+## 0.3.11
+
+### Patch Changes
+
+- [#6160](https://github.com/assistant-ui/assistant-ui/pull/6160) [`235fa59`](https://github.com/assistant-ui/assistant-ui/commit/235fa598a99f33170bb1e69c99c96fdb2bd643fc) - fix: preserve currency inside one- and two-backtick code spans that contain longer backtick runs ([@okisdev](https://github.com/okisdev))
+
+## 0.3.10
+
+### Patch Changes
+
+- [#5723](https://github.com/assistant-ui/assistant-ui/pull/5723) [`94dc3e5`](https://github.com/assistant-ui/assistant-ui/commit/94dc3e509fa2b4fae1a14c88ec34b910c8d95af8) - chore: update dependencies ([@okisdev](https://github.com/okisdev))
+
+## 0.3.9
+
+### Patch Changes
+
+- [#5612](https://github.com/assistant-ui/assistant-ui/pull/5612) [`c3fed24`](https://github.com/assistant-ui/assistant-ui/commit/c3fed240af35e6dd9a6e2d8710e28c06731a10fe) - fix: merge user rehypePlugins after the security hardening pipeline instead of dropping it ([@ShobhitPatra](https://github.com/ShobhitPatra))
+
+- [#5615](https://github.com/assistant-ui/assistant-ui/pull/5615) [`b3561cb`](https://github.com/assistant-ui/assistant-ui/commit/b3561cb71bd11ce059b7fc2360ef5a87d6efbb9a) - fix: preserve Streamdown sanitization extensions with security ([@rupic-app](https://github.com/apps/rupic-app))
+
 ## 0.3.8
 
 ### Patch Changes

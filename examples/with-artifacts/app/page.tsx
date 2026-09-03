@@ -1,15 +1,16 @@
 "use client";
 
-import { Thread } from "@/components/assistant-ui/thread";
+import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import {
   AssistantRuntimeProvider,
   AuiProvider,
+  AuiConfig,
   Suggestions,
   Tools,
   unstable_Interactables,
   useAui,
 } from "@assistant-ui/react";
-import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
+import { useChatRuntime } from "@assistant-ui/ai-sdk";
 import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
 import {
   ArtifactSurface,
@@ -38,7 +39,8 @@ function ArtifactExperience() {
 }
 
 function ArtifactScopes() {
-  const aui = useAui({
+  const aui = useAui();
+  const config = AuiConfig({
     tools: Tools({ toolkit }),
     unstable_interactables: unstable_Interactables(),
     suggestions: Suggestions([
@@ -58,7 +60,7 @@ function ArtifactScopes() {
   });
 
   return (
-    <AuiProvider value={aui}>
+    <AuiProvider extends={aui} config={config}>
       <ArtifactSurfaceProvider>
         <ArtifactExperience />
       </ArtifactSurfaceProvider>

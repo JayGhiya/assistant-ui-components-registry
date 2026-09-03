@@ -108,6 +108,11 @@ export const PACKAGES: PackageInfo[] = [
     category: "tooling",
   },
   {
+    name: "@assistant-ui/xpm",
+    description: "One command for npm, yarn, pnpm, bun, deno, and uv.",
+    category: "tooling",
+  },
+  {
     name: "create-assistant-ui",
     description: "Scaffold an assistant-ui app in one command.",
     category: "tooling",
@@ -128,6 +133,11 @@ export const PACKAGES: PackageInfo[] = [
     category: "tooling",
   },
   {
+    name: "@assistant-ui/metro",
+    description: "Metro plugin for the generative UI compiler.",
+    category: "tooling",
+  },
+  {
     name: "@assistant-ui/x-generative-compiler",
     description: 'Framework-agnostic "use generative" compiler.',
     category: "tooling",
@@ -135,6 +145,12 @@ export const PACKAGES: PackageInfo[] = [
   {
     name: "assistant-cloud",
     description: "Hosted backend for assistant-ui.",
+    category: "cloud",
+  },
+  {
+    name: "@assistant-ui/gorp",
+    description:
+      "Client/server state replicas with optimistic updates over a tiny wire protocol.",
     category: "cloud",
   },
   {
@@ -148,8 +164,13 @@ export const PACKAGES: PackageInfo[] = [
     category: "cloud",
   },
   {
-    name: "@assistant-ui/react-ai-sdk",
+    name: "@assistant-ui/ai-sdk",
     description: "Vercel AI SDK adapter.",
+    category: "frameworks",
+  },
+  {
+    name: "@assistant-ui/react-ai-sdk",
+    description: "Re-export of @assistant-ui/ai-sdk.",
     category: "frameworks",
   },
   {
@@ -175,6 +196,11 @@ export const PACKAGES: PackageInfo[] = [
   {
     name: "@assistant-ui/react-opencode",
     description: "OpenCode runtime adapter.",
+    category: "frameworks",
+  },
+  {
+    name: "@assistant-ui/react-pi",
+    description: "Pi coding-agent runtime adapter.",
     category: "frameworks",
   },
   {
@@ -208,6 +234,11 @@ export const PACKAGES: PackageInfo[] = [
     category: "ui",
   },
   {
+    name: "@assistant-ui/local-pdf-adapter",
+    description: "Local PDF attachment adapter for @assistant-ui/react.",
+    category: "ui",
+  },
+  {
     name: "@assistant-ui/react-streamdown",
     description: "Streamdown-based markdown rendering.",
     category: "ui",
@@ -230,6 +261,11 @@ export const PACKAGES: PackageInfo[] = [
   {
     name: "@assistant-ui/react-hook-form",
     description: "React Hook Form integration.",
+    category: "ui",
+  },
+  {
+    name: "@assistant-ui/react-generative-ui",
+    description: "Render model-authored component trees.",
     category: "ui",
   },
   {
@@ -292,6 +328,12 @@ export const PACKAGES: PackageInfo[] = [
   {
     name: "@assistant-ui/react-trieve",
     description: "Trieve search integration.",
+    category: "deprecated",
+    deprecated: true,
+  },
+  {
+    name: "@assistant-ui/react-ui",
+    description: "Pre-styled React components, superseded by the registry.",
     category: "deprecated",
     deprecated: true,
   },

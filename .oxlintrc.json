@@ -20,6 +20,16 @@
     "react/react-in-jsx-scope": "off",
     "react/exhaustive-deps": "warn",
     "react/rules-of-hooks": "warn",
+    "react/error-boundaries": "off",
+    "react/globals": "off",
+    "react/immutability": "off",
+    "react/incompatible-library": "off",
+    "react/preserve-manual-memoization": "off",
+    "react/purity": "off",
+    "react/refs": "off",
+    "react/set-state-in-effect": "warn",
+    "react/static-components": "off",
+    "react/use-memo": "off",
     "no-unused-vars": "off",
     "typescript/no-unused-vars": [
       "warn",
@@ -52,6 +62,7 @@
     "**/next-env.d.ts",
     "**/.tanstack/**",
     "**/.output/**",
+    "**/.nuxt/**",
     "**/routeTree.gen.ts",
     "**/*.html",
     "**/build/**",
@@ -63,9 +74,9 @@
   "overrides": [
     {
       "files": [
-        "packages/ui/src/components/ui/**",
-        "packages/ui/src/components/assistant-ui/**",
-        "packages/ui/src/components/icons/**",
+        "packages/ui/src/components/react/ui/**",
+        "packages/ui/src/components/react/assistant-ui/**",
+        "packages/ui/src/components/react/icons/**",
         "templates/*/components/ui/**",
         "templates/*/components/assistant-ui/**",
         "templates/*/components/icons/**"

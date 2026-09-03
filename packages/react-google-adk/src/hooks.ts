@@ -1,7 +1,8 @@
+import { generateId } from "@assistant-ui/core";
 import { useAui } from "@assistant-ui/store";
-import { v4 as uuidv4 } from "uuid";
 import type { ReadonlyJSONValue } from "assistant-stream/utils";
 import { adkExtras } from "./adkExtras";
+import { toAdkConfirmationReply } from "./adkToolApproval";
 import type {
   AdkMessage,
   AdkSendMessageConfig,
@@ -66,22 +67,9 @@ export const useAdkConfirmTool = () => {
     confirmed: boolean,
     payload?: ReadonlyJSONValue,
   ) =>
-    adkExtras.get(aui).send(
-      [
-        {
-          id: uuidv4(),
-          type: "tool",
-          tool_call_id: toolCallId,
-          name: "adk_request_confirmation",
-          content: JSON.stringify({
-            confirmed,
-            ...(payload != null && { payload }),
-          }),
-          status: "success",
-        },
-      ],
-      {},
-    );
+    adkExtras
+      .get(aui)
+      .send([toAdkConfirmationReply(toolCallId, confirmed, payload)], {});
 };
 
 /** Returns a function to submit auth credentials for a pending auth request. */
@@ -91,7 +79,7 @@ export const useAdkSubmitAuth = () => {
     adkExtras.get(aui).send(
       [
         {
-          id: uuidv4(),
+          id: generateId(),
           type: "tool",
           tool_call_id: toolCallId,
           name: "adk_request_credential",
@@ -110,7 +98,7 @@ export const useAdkSubmitInput = () => {
     adkExtras.get(aui).send(
       [
         {
-          id: uuidv4(),
+          id: generateId(),
           type: "tool",
           tool_call_id: toolCallId,
           name: "adk_request_input",

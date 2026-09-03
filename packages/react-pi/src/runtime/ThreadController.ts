@@ -21,6 +21,7 @@ import {
   type PiThreadState,
 } from "./threadState";
 import { errorText } from "../utils";
+import { isKnownPiClientEventType } from "../eventTypes";
 import { projectPiThreadMessagesShared } from "./messageProjection";
 import {
   responseForApproval,
@@ -47,8 +48,17 @@ export type PiSendOptions = {
 
 export type PiNotificationScheduler = (flush: () => void) => void;
 
+/** `getStateSnapshot` (or `getState` where it is absent) and
+ * `getMessageRepository` are read as `useSyncExternalStore` snapshots, so an
+ * implementation must return a reference that changes only when a subscribed
+ * channel notifies; a freshly built value per call loops React. */
 export interface PiThreadControllerLike {
   getState(): PiThreadState;
+  /** The state as of the last listener notification. `getState()` can run
+   * ahead of it while a coalesced message frame is pending, so only this is a
+   * valid `useSyncExternalStore` snapshot. Optional for backwards
+   * compatibility; callers fall back to `getState()`. */
+  getStateSnapshot?(): PiThreadState;
   getProjectedMessages(): readonly ThreadMessageLike[];
   getMessageRepository(): ExportedMessageRepository;
   getVersion(): number;
@@ -80,6 +90,16 @@ const defaultScheduleNotify: PiNotificationScheduler = (flush) => {
     return;
   }
   setTimeout(flush, 16);
+};
+
+const notifyListeners = (listeners: Iterable<() => void>) => {
+  for (const listener of listeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.error("[react-pi] Listener threw an error", error);
+    }
+  }
 };
 
 /** Event types the reducer acts on. Anything else triggers a snapshot refresh
@@ -119,24 +139,16 @@ const METADATA_DIRTY_EVENT_TYPES: ReadonlySet<string> = new Set([
   "error",
 ]);
 
-/** Everything the reducer understands: the two dirty sets plus the event types
- * it deliberately absorbs without marking anything dirty. */
-const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
-  ...MESSAGE_DIRTY_EVENT_TYPES,
-  ...METADATA_DIRTY_EVENT_TYPES,
-  "turn_start",
-  "turn_end",
-  "tool_execution_start",
-  "agent_settled",
-  "entry_appended",
-]);
-
 /** Parse a `data:<mime>;base64,<data>` URL into Pi `ImageContent`. Non-data-URL
  * strings pass through as opaque base64 with a generic image mime. */
 const toImageContent = (image: string): PiImageContent => {
-  const match = /^data:([^;,]+)(?:;base64)?,(.*)$/s.exec(image);
+  const match = /^data:([^;,]+)(?:;base64)?,(.*)$/is.exec(image);
   if (match) {
-    return { type: "image", mimeType: match[1]!, data: match[2]! };
+    return {
+      type: "image",
+      mimeType: match[1]!.toLowerCase(),
+      data: match[2]!,
+    };
   }
   return { type: "image", mimeType: "image/png", data: image };
 };
@@ -225,6 +237,7 @@ const markStateRunning = (state: PiThreadState): PiThreadState => {
 
 export class PiThreadController implements PiThreadControllerLike {
   private state: PiThreadState;
+  private stateSnapshot: PiThreadState;
   private projectedMessages: readonly ThreadMessageLike[] = [];
   private messageRepository = ExportedMessageRepository.fromArray([]);
   private version = 0;
@@ -258,10 +271,15 @@ export class PiThreadController implements PiThreadControllerLike {
     this.threadId = threadId;
     this.options = options;
     this.state = createPiThreadState(threadId);
+    this.stateSnapshot = this.state;
   }
 
   public getState() {
     return this.state;
+  }
+
+  public getStateSnapshot() {
+    return this.stateSnapshot;
   }
 
   public getProjectedMessages() {
@@ -602,7 +620,7 @@ export class PiThreadController implements PiThreadControllerLike {
     // Pi 0.80.7 emits entry_appended only for custom extension entries. Keep
     // snapshot reconciliation for other variants if Pi broadens that event.
     const needsSnapshotRefresh =
-      !KNOWN_EVENT_TYPES.has(event.type) ||
+      !isKnownPiClientEventType(event.type) ||
       (event.type === "entry_appended" && event.entry?.type !== "custom");
     if (needsSnapshotRefresh) this.refreshInBackground();
   }
@@ -651,7 +669,10 @@ export class PiThreadController implements PiThreadControllerLike {
 
   private recomputeProjectedMessagesAndNotify() {
     const next = this.projectMessages();
-    if (next === this.projectedMessages) return;
+    if (next === this.projectedMessages) {
+      if (this.state !== this.stateSnapshot) this.publishState();
+      return;
+    }
     this.projectedMessages = next;
     // `fromArray` chains messages linearly and keeps their stable `pi-msg:N`
     // ids (its generated id is only a fallback for id-less messages).
@@ -673,15 +694,27 @@ export class PiThreadController implements PiThreadControllerLike {
     this.version += 1;
   }
 
-  private notifyMetadataListeners() {
+  /** `message_end` advances state without moving the projection, so neither
+   * the metadata nor the message channel describes what changed. Publishing on
+   * `all` alone reaches every state subscriber without redefining what
+   * `subscribeMetadata` fires for. */
+  private publishState() {
+    this.stateSnapshot = this.state;
     this.bumpVersion();
-    for (const listener of this.metadataListeners) listener();
-    for (const listener of this.allListeners) listener();
+    notifyListeners(this.allListeners);
+  }
+
+  private notifyMetadataListeners() {
+    this.stateSnapshot = this.state;
+    this.bumpVersion();
+    notifyListeners(this.metadataListeners);
+    notifyListeners(this.allListeners);
   }
 
   private notifyMessageListeners() {
+    this.stateSnapshot = this.state;
     this.bumpVersion();
-    for (const listener of this.messageListeners) listener();
-    for (const listener of this.allListeners) listener();
+    notifyListeners(this.messageListeners);
+    notifyListeners(this.allListeners);
   }
 }

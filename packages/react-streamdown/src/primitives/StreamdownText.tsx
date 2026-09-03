@@ -3,10 +3,18 @@
 import { useMessagePartText, useSmooth } from "@assistant-ui/react";
 import { harden } from "rehype-harden";
 import rehypeRaw from "rehype-raw";
-import rehypeSanitize from "rehype-sanitize";
-import { Streamdown, type StreamdownProps } from "streamdown";
+import rehypeSanitize, {
+  defaultSchema,
+  type Options as SanitizeSchema,
+} from "rehype-sanitize";
+import {
+  Streamdown,
+  defaultRehypePlugins,
+  type StreamdownProps,
+} from "streamdown";
 import {
   type ComponentRef,
+  type FC,
   forwardRef,
   useDeferredValue,
   useMemo,
@@ -14,19 +22,96 @@ import {
 import { useAdaptedComponents } from "../adapters/components-adapter";
 import { DEFAULT_SHIKI_THEME, mergePlugins } from "../defaults";
 import { tailBoundedRemend } from "../remend";
-import type { SecurityConfig, StreamdownTextPrimitiveProps } from "../types";
+import type {
+  AllowedTags,
+  RemendConfig,
+  SecurityConfig,
+  StreamdownTextPrimitiveProps,
+} from "../types";
 
 type StreamdownTextPrimitiveElement = ComponentRef<"div">;
 
-/**
- * Builds rehypePlugins array with security configuration.
- */
+type StreamdownBodyProps = Omit<StreamdownProps, "children"> & {
+  text: string;
+  shouldTailRemend: boolean;
+  remendConfig: RemendConfig | undefined;
+};
+
+const useRepairedText = (
+  text: string,
+  shouldTailRemend: boolean,
+  remendConfig: RemendConfig | undefined,
+) =>
+  useMemo(
+    () => (shouldTailRemend ? tailBoundedRemend(text, remendConfig) : text),
+    [shouldTailRemend, text, remendConfig],
+  );
+
+const StreamdownBody: FC<StreamdownBodyProps> = ({
+  text,
+  shouldTailRemend,
+  remendConfig,
+  ...props
+}) => {
+  const repairedText = useRepairedText(text, shouldTailRemend, remendConfig);
+  return <Streamdown {...props}>{repairedText}</Streamdown>;
+};
+
+// `useDeferredValue` schedules a second render pass whenever its input changes,
+// so the deferred path lives in its own component and `defer={false}` never
+// mounts it. The repair stays below the deferral so it runs in the deferred
+// pass rather than on the urgent one.
+const DeferredStreamdownBody: FC<StreamdownBodyProps> = ({
+  text,
+  shouldTailRemend,
+  remendConfig,
+  ...props
+}) => {
+  const deferredText = useDeferredValue(text);
+  const repairedText = useRepairedText(
+    deferredText,
+    shouldTailRemend,
+    remendConfig,
+  );
+  return <Streamdown {...props}>{repairedText}</Streamdown>;
+};
+
+// Streamdown extends the default sanitize schema without exporting it, so it is
+// read back off its own plugin set; a copy would fall behind on a bump. An
+// unrecognized shape falls back to that default, which hast-util-sanitize
+// shallow-merges, so a partial schema here would strip every unlisted tag.
+const sanitizeEntry: unknown = defaultRehypePlugins["sanitize"];
+const streamdownSanitizeSchema = (
+  Array.isArray(sanitizeEntry) ? sanitizeEntry[1] : defaultSchema
+) as SanitizeSchema;
+
+function buildSecuritySanitizeSchema(
+  allowedTags: AllowedTags | undefined,
+): SanitizeSchema {
+  if (!allowedTags || Object.keys(allowedTags).length === 0) {
+    return streamdownSanitizeSchema;
+  }
+
+  return {
+    ...streamdownSanitizeSchema,
+    tagNames: [
+      ...(streamdownSanitizeSchema.tagNames ?? []),
+      ...Object.keys(allowedTags),
+    ],
+    attributes: {
+      ...streamdownSanitizeSchema.attributes,
+      ...allowedTags,
+    },
+  };
+}
+
 function buildSecurityRehypePlugins(
   security: SecurityConfig,
+  allowedTags: AllowedTags | undefined,
 ): NonNullable<StreamdownProps["rehypePlugins"]> {
   return [
     rehypeRaw,
-    [rehypeSanitize, {}],
+    [rehypeSanitize, buildSecuritySanitizeSchema(allowedTags)],
     [
       harden,
       {
@@ -109,6 +194,7 @@ export const StreamdownTextPrimitive = forwardRef<
       parseIncompleteMarkdown,
       allowedTags,
       remarkRehypeOptions,
+      rehypePlugins: userRehypePlugins,
       security,
       BlockComponent,
       parseMarkdownIntoBlocksFn,
@@ -133,20 +219,10 @@ export const StreamdownTextPrimitive = forwardRef<
 
     const { text, status } = useSmooth(processedPart, smooth);
 
-    const deferredText = useDeferredValue(text);
-    const processedText = defer ? deferredText : text;
-
     const shouldTailRemend =
       mode === "streaming" &&
       parseIncompleteMarkdown !== false &&
       !parseMarkdownIntoBlocksFn;
-    const repairedText = useMemo(
-      () =>
-        shouldTailRemend
-          ? tailBoundedRemend(processedText, remend)
-          : processedText,
-      [shouldTailRemend, processedText, remend],
-    );
     const resolvedParseIncomplete = shouldTailRemend
       ? false
       : parseIncompleteMarkdown;
@@ -183,10 +259,13 @@ export const StreamdownTextPrimitive = forwardRef<
       return classes || undefined;
     }, [containerClassName, containerProps?.className]);
 
-    const rehypePlugins = useMemo(
-      () => (security ? buildSecurityRehypePlugins(security) : undefined),
-      [security],
-    );
+    const rehypePlugins = useMemo(() => {
+      if (!security) return userRehypePlugins;
+      return [
+        ...buildSecurityRehypePlugins(security, allowedTags),
+        ...(userRehypePlugins ?? []),
+      ];
+    }, [allowedTags, security, userRehypePlugins]);
 
     const optionalProps = {
       ...(className && { className }),
@@ -207,6 +286,8 @@ export const StreamdownTextPrimitive = forwardRef<
       ...(parseMarkdownIntoBlocksFn && { parseMarkdownIntoBlocksFn }),
     };
 
+    const Body = defer ? DeferredStreamdownBody : StreamdownBody;
+
     return (
       <div
         ref={ref}
@@ -214,15 +295,16 @@ export const StreamdownTextPrimitive = forwardRef<
         {...containerProps}
         className={containerClass}
       >
-        <Streamdown
+        <Body
+          text={text}
+          shouldTailRemend={shouldTailRemend}
+          remendConfig={remend}
           mode={mode}
           isAnimating={status.type === "running"}
           components={mergedComponents}
           {...optionalProps}
           {...streamdownProps}
-        >
-          {repairedText}
-        </Streamdown>
+        />
       </div>
     );
   },

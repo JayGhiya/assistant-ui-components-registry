@@ -1,6 +1,11 @@
 "use client";
 
-import { useAui, AuiProvider, Suggestions } from "@assistant-ui/react";
+import {
+  useAui,
+  AuiProvider,
+  AuiConfig,
+  Suggestions,
+} from "@assistant-ui/react";
 import {
   useA2ATask,
   useA2AArtifacts,
@@ -8,7 +13,7 @@ import {
   type A2ATaskState,
   type A2APart,
 } from "@assistant-ui/react-a2a";
-import { Thread } from "@/components/assistant-ui/thread";
+import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 
 const STATE_CONFIG: Record<
   string,
@@ -249,7 +254,8 @@ function AgentCardBanner() {
 }
 
 function ThreadWithSuggestions() {
-  const aui = useAui({
+  const aui = useAui();
+  const config = AuiConfig({
     suggestions: Suggestions([
       {
         title: "Chat",
@@ -279,7 +285,7 @@ function ThreadWithSuggestions() {
     ]),
   });
   return (
-    <AuiProvider value={aui}>
+    <AuiProvider extends={aui} config={config}>
       <Thread />
     </AuiProvider>
   );

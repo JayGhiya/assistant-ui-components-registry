@@ -25,7 +25,23 @@ function compilerCacheToken(): string {
 }
 
 /** The loader plus the cache-busting token, in the `{ loader, options }` form both bundlers accept. */
-const LOADER_USE = { loader: LOADER, options: { v: compilerCacheToken() } };
+function loaderUse(options: WithAuiOptions) {
+  return {
+    loader: LOADER,
+    options: {
+      v: compilerCacheToken(),
+      ...(options.backendless && { backendless: true }),
+    },
+  };
+}
+
+/**
+ * Restricts the rule to modules that carry the directive, matching the loader's
+ * own detection. A glob alone also matches modules Turbopack generates, such as
+ * the shim behind `new Worker(new URL(...))`, whose resource path is not on the
+ * project filesystem and fails the build when a loader reads its source back.
+ */
+const HAS_DIRECTIVE = { content: /["']use generative["']/ };
 
 export interface WithAuiOptions {
   /**
@@ -33,10 +49,18 @@ export interface WithAuiOptions {
    * Narrow it (e.g. `["*.generative.tsx"]`) to limit what passes through the loader.
    */
   rules?: string[];
+  /**
+   * The app has no backend importing the server builds of its `"use generative"`
+   * modules (e.g. cloud-hosted runs). Frontend/human tool schemas then stay
+   * uploadable from the client instead of being assumed backend-known.
+   */
+  backendless?: boolean;
 }
 
 // Loosely typed so this module doesn't need `next` as a dependency.
 type NextConfigLike = {
+  /** assistant-ui options, stripped from the config handed back to Next. */
+  aui?: WithAuiOptions | undefined;
   turbopack?: { rules?: Record<string, unknown> } | undefined;
   webpack?: ((config: any, context: any) => any) | null | undefined;
 };
@@ -49,35 +73,36 @@ type NextConfigLike = {
  * ```ts
  * // next.config.ts
  * import { withAui } from "@assistant-ui/next";
- * export default withAui({ ...yourConfig });
+ * export default withAui({ ...yourConfig, aui: { backendless: true } });
  * ```
  */
 export function withAui<T extends NextConfigLike>(
   nextConfig: T = {} as T,
   options: WithAuiOptions = {},
 ): T {
-  const globs = options.rules ?? ["*.ts", "*.tsx"];
-  // Merge the `"use generative"` loader into the user's rules: if a glob already
-  // has a `{ loaders }` rule, append ours rather than clobbering it (see DESIGN.md).
+  // Next warns on config keys it does not recognize, so `aui` must not survive
+  // into the returned config.
+  const { aui, ...baseConfig } = nextConfig;
+  const resolved = { ...options, ...aui };
+  const globs = resolved.rules ?? ["*.ts", "*.tsx"];
+  const loader = loaderUse(resolved);
+  // Turbopack runs every rule matching a glob in order, so the `"use generative"`
+  // loader rides as its own entry after the user's: theirs keeps its loaders and
+  // its own condition, ours keeps a condition that would disable theirs.
   const rules: Record<string, unknown> = { ...nextConfig.turbopack?.rules };
   for (const glob of globs) {
     const existing = rules[glob];
-    const existingLoaders =
-      existing &&
-      typeof existing === "object" &&
-      Array.isArray((existing as { loaders?: unknown }).loaders)
-        ? (existing as { loaders: unknown[] }).loaders
-        : [];
-    rules[glob] = {
-      ...(existing as object),
-      loaders: [...existingLoaders, LOADER_USE],
-    };
+    const ours = { condition: HAS_DIRECTIVE, loaders: [loader] };
+    rules[glob] =
+      existing === undefined
+        ? ours
+        : [...(Array.isArray(existing) ? existing : [existing]), ours];
   }
 
   const userWebpack = nextConfig.webpack;
 
   return {
-    ...nextConfig,
+    ...baseConfig,
     turbopack: {
       ...nextConfig.turbopack,
       rules,
@@ -88,7 +113,7 @@ export function withAui<T extends NextConfigLike>(
       config.module.rules.push({
         test: /\.[jt]sx?$/,
         exclude: /node_modules/,
-        use: [LOADER_USE],
+        use: [loader],
       });
 
       return userWebpack ? userWebpack(config, context) : config;

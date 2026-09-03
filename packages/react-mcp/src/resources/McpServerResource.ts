@@ -1,23 +1,33 @@
 import { useState, useRef, useEffect, useMemo, useEffectEvent } from "react";
-import { resource } from "@assistant-ui/tap";
+import { resource, useResource, withKey } from "@assistant-ui/tap";
 import type { ClientOutput } from "@assistant-ui/store";
 import {
   Client,
   StreamableHTTPClientTransport,
   UnauthorizedError,
+  type ClientOptions,
+  type ElicitRequest,
+  type ElicitResult,
   type StreamableHTTPClientTransportOptions,
 } from "@modelcontextprotocol/client";
-import { createOAuthProvider } from "../auth/createOAuthProvider";
+import {
+  clearOAuthProviderAuthState,
+  createOAuthProvider,
+} from "../auth/createOAuthProvider";
 import { buildHeaders } from "../auth/buildHeaders";
 import { assertValidServerId } from "../utils/serverId";
+import { validateElicitationContent } from "./validateElicitationContent";
 import type { MCPStorage } from "./storage/types";
 import type {
   MCPAuthConfig,
   MCPConnectionState,
+  MCPElicitation,
+  MCPElicitationResponse,
   MCPServerKind,
   MCPServerState,
   MCPToolInfo,
 } from "../mcp-scope";
+import { createMcpId } from "../utils/createMcpId";
 
 export type McpServerResourceProps = {
   id: string;
@@ -30,11 +40,55 @@ export type McpServerResourceProps = {
   redirectUri: string;
   autoConnect: boolean;
   connectionTimeout?: number | undefined;
+  cache?: { readonly defaultTtlMs?: number } | undefined;
+  readonly elicitation?: boolean;
   onRemove: () => Promise<void>;
 };
 
-const useMcpServerResource = (
+type McpServerResourceInstanceProps = McpServerResourceProps & {
+  transportCloseQueueRef: { current: Promise<void> };
+};
+
+export const getConnectionDependencies = (
   props: McpServerResourceProps,
+): readonly unknown[] => {
+  const auth = props.auth;
+  const authDependencies =
+    auth.type === "bearer"
+      ? [auth.type, auth.token, props.storage.scopeId]
+      : auth.type === "oauth"
+        ? [
+            auth.type,
+            auth.scopes?.length,
+            ...(auth.scopes ?? []),
+            auth.authorizationEndpoint,
+            auth.tokenEndpoint,
+            auth.registrationEndpoint,
+            auth.clientId,
+            auth.clientSecret,
+            props.storage.scopeId,
+          ]
+        : [auth.type];
+
+  return [
+    props.id,
+    props.url,
+    ...authDependencies,
+    props.redirectUri,
+    props.cache?.defaultTtlMs,
+    props.elicitation !== false,
+  ];
+};
+
+const areConnectionDependenciesEqual = (
+  left: readonly unknown[],
+  right: readonly unknown[],
+) =>
+  left.length === right.length &&
+  left.every((value, index) => Object.is(value, right[index]));
+
+const useMcpServerResourceInstance = (
+  props: McpServerResourceInstanceProps,
 ): ClientOutput<"mcpServer"> => {
   assertValidServerId(props.id);
   const [connectionState, setConnectionState] =
@@ -42,14 +96,32 @@ const useMcpServerResource = (
   const [tools, setTools] = useState<MCPToolInfo[]>([]);
   const [lastError, setLastError] = useState<{ message: string } | null>(null);
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
+  const [pendingElicitations, setPendingElicitations] = useState<
+    MCPElicitation[]
+  >([]);
 
   const clientRef = useRef<Client | null>(null);
   const transportRef = useRef<StreamableHTTPClientTransport | null>(null);
   const pendingTransportRef = useRef<StreamableHTTPClientTransport | null>(
     null,
   );
-  const transportCloseQueueRef = useRef(Promise.resolve());
   const connectionGenerationRef = useRef(0);
+  const pendingAuthValidationRef = useRef<{
+    count: number;
+    promise: Promise<void>;
+    resolve: () => void;
+  } | null>(null);
+  const elicitationResolversRef = useRef(
+    new Map<
+      string,
+      {
+        resolve: (result: ElicitResult) => void;
+        signal: AbortSignal;
+        onAbort: () => void;
+        requestedSchema: unknown;
+      }
+    >(),
+  );
   const pendingDisposalRef = useRef<{ cancelled: boolean } | null>(null);
   const mountedRef = useRef(true);
 
@@ -66,10 +138,10 @@ const useMcpServerResource = (
   const closeQueuedTransports = (
     transports: StreamableHTTPClientTransport[],
   ): Promise<void> => {
-    const task = transportCloseQueueRef.current.then(async () => {
+    const task = props.transportCloseQueueRef.current.then(async () => {
       await Promise.all(transports.map(closeTransportSafely));
     });
-    transportCloseQueueRef.current = task;
+    props.transportCloseQueueRef.current = task;
     return task;
   };
 
@@ -79,20 +151,57 @@ const useMcpServerResource = (
     await closeQueuedTransports(transport ? [transport] : []);
   };
 
-  const closeTransports = async () => {
+  const resolvePendingElicitation = (id: string, result: ElicitResult) => {
+    const entry = elicitationResolversRef.current.get(id);
+    if (!entry) return false;
+    elicitationResolversRef.current.delete(id);
+    entry.signal.removeEventListener("abort", entry.onAbort);
+    setPendingElicitations((current) =>
+      current.filter((elicitation) => elicitation.id !== id),
+    );
+    entry.resolve(result);
+    return true;
+  };
+
+  const setPendingElicitationError = (
+    id: string,
+    error: NonNullable<MCPElicitation["error"]>,
+  ) => {
+    if (!elicitationResolversRef.current.has(id)) return false;
+    setPendingElicitations((current) =>
+      current.map((elicitation) =>
+        elicitation.id === id ? { ...elicitation, error } : elicitation,
+      ),
+    );
+    return true;
+  };
+
+  const cancelPendingElicitations = () => {
+    for (const [id] of elicitationResolversRef.current) {
+      resolvePendingElicitation(id, { action: "cancel" });
+    }
+  };
+
+  const detachTransports = () => {
+    cancelPendingElicitations();
     const pendingTransport = pendingTransportRef.current;
     const activeTransport = transportRef.current;
     pendingTransportRef.current = null;
     transportRef.current = null;
     clientRef.current = null;
 
-    const transports = new Set(
-      [pendingTransport, activeTransport].filter(
-        (transport): transport is StreamableHTTPClientTransport =>
-          transport !== null,
+    return [
+      ...new Set(
+        [pendingTransport, activeTransport].filter(
+          (transport): transport is StreamableHTTPClientTransport =>
+            transport !== null,
+        ),
       ),
-    );
-    await closeQueuedTransports([...transports]);
+    ];
+  };
+
+  const closeTransports = async () => {
+    await closeQueuedTransports(detachTransports());
   };
 
   const isCurrentConnection = (generation: number) =>
@@ -161,15 +270,130 @@ const useMcpServerResource = (
     },
   );
 
+  const applyToolsList = useEffectEvent(
+    (list: {
+      tools: Array<{
+        name: string;
+        description?: string | undefined;
+        inputSchema: unknown;
+      }>;
+    }) => {
+      setTools(
+        list.tools.map((t) => {
+          const info: MCPToolInfo = {
+            name: t.name,
+            inputSchema: t.inputSchema,
+          };
+          if (t.description !== undefined) info.description = t.description;
+          return info;
+        }),
+      );
+    },
+  );
+
+  const syncTools = useEffectEvent(
+    async (
+      client: Client,
+      generation: number,
+      options?: { startedAt?: number | undefined },
+    ): Promise<boolean> => {
+      const listPromise = client.listTools();
+      const list =
+        options?.startedAt === undefined
+          ? await listPromise
+          : await withConnectionTimeout(
+              listPromise,
+              "listing tools",
+              options.startedAt,
+            );
+      if (!isCurrentConnection(generation)) return false;
+      applyToolsList(list);
+      return true;
+    },
+  );
+
   const finalizeConnect = useEffectEvent(
     async (
       transport: StreamableHTTPClientTransport,
       generation: number,
     ): Promise<boolean> => {
-      const client = new Client({
-        name: "assistant-ui-mcp",
-        version: "0.0.0",
-      });
+      const clientOptions: ClientOptions = {
+        ...(props.elicitation === false
+          ? {}
+          : { capabilities: { elicitation: {} } }),
+        listChanged: {
+          tools: {
+            autoRefresh: true,
+            debounceMs: 300,
+            onChanged: (error, items) => {
+              if (!isCurrentConnection(generation)) return;
+              if (error !== null) {
+                setLastError({ message: error.message });
+                return;
+              }
+              if (items === null) return;
+              setLastError(null);
+              applyToolsList({ tools: items });
+            },
+          },
+        },
+      };
+      if (props.cache?.defaultTtlMs !== undefined) {
+        clientOptions.defaultCacheTtlMs = props.cache.defaultTtlMs;
+      }
+      const client = new Client(
+        {
+          name: "assistant-ui-mcp",
+          version: "0.0.0",
+        },
+        clientOptions,
+      );
+      if (props.elicitation !== false) {
+        client.setRequestHandler(
+          "elicitation/create",
+          (request: ElicitRequest, context): Promise<ElicitResult> => {
+            if (!isCurrentConnection(generation)) {
+              return Promise.resolve({ action: "cancel" });
+            }
+            if (!("requestedSchema" in request.params)) {
+              return Promise.resolve({ action: "cancel" });
+            }
+            const { message, requestedSchema } = request.params;
+
+            const id = createMcpId();
+            const promise = new Promise<ElicitResult>((resolve) => {
+              const onAbort = () => {
+                resolvePendingElicitation(id, { action: "cancel" });
+              };
+              elicitationResolversRef.current.set(id, {
+                resolve,
+                signal: context.signal,
+                onAbort,
+                requestedSchema,
+              });
+            });
+            setPendingElicitations((current) => [
+              ...current,
+              {
+                id,
+                message,
+                requestedSchema,
+              },
+            ]);
+            const entry = elicitationResolversRef.current.get(id);
+            if (entry) {
+              if (context.signal.aborted) {
+                entry.onAbort();
+              } else {
+                context.signal.addEventListener("abort", entry.onAbort, {
+                  once: true,
+                });
+              }
+            }
+            return promise;
+          },
+        );
+      }
       const startedAt = Date.now();
       await withConnectionTimeout(
         client.connect(transport),
@@ -181,26 +405,12 @@ const useMcpServerResource = (
       // post-connect failure leaves stale refs that `callTool()` would
       // happily walk into, producing confusing SDK errors instead of
       // "not connected".
-      const list = await withConnectionTimeout(
-        client.listTools(),
-        "listing tools",
-        startedAt,
-      );
-      if (!isCurrentConnection(generation)) return false;
+      const synced = await syncTools(client, generation, { startedAt });
+      if (!synced) return false;
 
       pendingTransportRef.current = null;
       clientRef.current = client;
       transportRef.current = transport;
-      setTools(
-        list.tools.map((t) => {
-          const info: MCPToolInfo = {
-            name: t.name,
-            inputSchema: t.inputSchema,
-          };
-          if (t.description !== undefined) info.description = t.description;
-          return info;
-        }),
-      );
       setConnectionState("connected");
       return true;
     },
@@ -241,6 +451,7 @@ const useMcpServerResource = (
         transportRef.current = transport;
         setConnectionState("authRequired");
       } else {
+        cancelPendingElicitations();
         if (transport) {
           pendingTransportRef.current = null;
           await closeQueuedTransports([transport]);
@@ -262,16 +473,53 @@ const useMcpServerResource = (
   });
 
   const doCompleteAuth = useEffectEvent(async (callbackUrl: string) => {
+    const validationGeneration = connectionGenerationRef.current;
+    const url = new URL(callbackUrl);
+    const state = url.searchParams.get("state");
+    if (!state) throw new Error('missing "state" parameter');
+    let pendingAuthValidation = pendingAuthValidationRef.current;
+    if (!pendingAuthValidation) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((resolvePromise) => {
+        resolve = resolvePromise;
+      });
+      pendingAuthValidation = { count: 0, promise, resolve };
+      pendingAuthValidationRef.current = pendingAuthValidation;
+    }
+    pendingAuthValidation.count += 1;
+    try {
+      const persisted = await props.storage.loadAuthState(props.id);
+      if (!isCurrentConnection(validationGeneration)) {
+        throw createInterruptedAuthError();
+      }
+      if (!persisted?.state) {
+        throw new Error(
+          "no pending OAuth authorization request for this server",
+        );
+      }
+      if (persisted.state !== state) {
+        throw new Error("OAuth state does not match the authorization request");
+      }
+      if (!url.searchParams.get("code") && !url.searchParams.get("error")) {
+        throw new Error("missing authorization code in callback URL");
+      }
+    } finally {
+      pendingAuthValidation.count -= 1;
+      if (pendingAuthValidation.count === 0) {
+        pendingAuthValidationRef.current = null;
+        pendingAuthValidation.resolve();
+      }
+    }
+
+    // Claim the generation before a waiting auto-connect can resume.
     const generation = ++connectionGenerationRef.current;
+    cancelPendingElicitations();
     await closePendingTransport();
     if (!isCurrentConnection(generation)) throw createInterruptedAuthError();
 
     setConnectionState("authPending");
     setLastError(null);
     try {
-      const url = new URL(callbackUrl);
-      const code = url.searchParams.get("code");
-      if (!code) throw new Error("missing authorization code in callback URL");
       let transport = transportRef.current;
       if (!transport) {
         transport = await buildTransport();
@@ -283,7 +531,7 @@ const useMcpServerResource = (
       transportRef.current = null;
       clientRef.current = null;
       pendingTransportRef.current = transport;
-      await transport.finishAuth(code);
+      await transport.finishAuth(url.searchParams);
       if (!isCurrentConnection(generation)) throw createInterruptedAuthError();
       setAuthorizationUrl(null);
       const connected = await finalizeConnect(transport, generation);
@@ -314,12 +562,29 @@ const useMcpServerResource = (
         void doConnect();
         return;
       }
-      const persisted = await props.storage.loadAuthState(props.id);
-      if (signal.cancelled) return;
+      const generation = connectionGenerationRef.current;
+      let persisted: Awaited<ReturnType<MCPStorage["loadAuthState"]>>;
+      try {
+        persisted = await props.storage.loadAuthState(props.id);
+      } catch (error) {
+        if (signal.cancelled || !isCurrentConnection(generation)) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setLastError({
+          message: `MCP server "${props.id}" failed to load saved authentication: ${message}`,
+        });
+        setConnectionState("error");
+        return;
+      }
+      if (signal.cancelled || !isCurrentConnection(generation)) return;
       if (props.auth.type === "oauth") {
         if (!persisted?.tokens) return;
       } else if (!persisted?.token) {
         return;
+      }
+      const pendingAuthValidation = pendingAuthValidationRef.current;
+      if (pendingAuthValidation) {
+        await pendingAuthValidation.promise;
+        if (signal.cancelled || !isCurrentConnection(generation)) return;
       }
       void doConnect();
     },
@@ -327,6 +592,7 @@ const useMcpServerResource = (
 
   // Auto-connect on mount when usable auth exists.
   useEffect(() => {
+    const transportCloseQueueRef = props.transportCloseQueueRef;
     const previousDisposal = pendingDisposalRef.current;
     if (previousDisposal) previousDisposal.cancelled = true;
     const pendingDisposal = { cancelled: false };
@@ -337,14 +603,15 @@ const useMcpServerResource = (
     return () => {
       mountedRef.current = false;
       signal.cancelled = true;
-      // Defer disposal so StrictMode can replay setup before closing the transport.
-      queueMicrotask(() => {
+      const task = transportCloseQueueRef.current.then(async () => {
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
         if (pendingDisposal.cancelled) return;
         connectionGenerationRef.current += 1;
-        void closeTransports();
+        await Promise.all(detachTransports().map(closeTransportSafely));
       });
+      transportCloseQueueRef.current = task;
     };
-  }, []);
+  }, [props.transportCloseQueueRef]);
 
   const state = useMemo<MCPServerState>(
     () => ({
@@ -357,6 +624,7 @@ const useMcpServerResource = (
       lastError,
       tools,
       authorizationUrl,
+      pendingElicitations,
     }),
     [
       props.id,
@@ -368,6 +636,7 @@ const useMcpServerResource = (
       lastError,
       tools,
       authorizationUrl,
+      pendingElicitations,
     ],
   );
 
@@ -377,8 +646,15 @@ const useMcpServerResource = (
     disconnect: doDisconnect,
     remove: async () => {
       await doDisconnect();
-      await props.storage.clearAuthState(props.id);
-      await props.onRemove();
+      try {
+        await clearOAuthProviderAuthState(props.storage, props.id);
+        await props.onRemove();
+      } catch (err) {
+        setLastError({
+          message: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
     },
     callTool: async (name, args) => {
       const client = clientRef.current;
@@ -405,7 +681,84 @@ const useMcpServerResource = (
       return await client.readResource({ uri });
     },
     completeAuth: doCompleteAuth,
+    answerElicitation: (
+      id: string,
+      response: MCPElicitationResponse,
+    ): readonly { property: string; message: string }[] | undefined => {
+      if (response.action === "accept") {
+        const entry = elicitationResolversRef.current.get(id);
+        if (!entry) return;
+
+        if (
+          typeof response.content !== "object" ||
+          response.content === null ||
+          Array.isArray(response.content)
+        ) {
+          const errors = [
+            {
+              property: "content",
+              message: "Response content must be an object.",
+            },
+          ];
+          setPendingElicitationError(id, {
+            message: "Invalid elicitation content: content.",
+            properties: ["content"],
+          });
+          return errors;
+        }
+
+        const errors = validateElicitationContent(
+          entry.requestedSchema,
+          response.content,
+        );
+        if (errors.length > 0) {
+          const properties = [
+            ...new Set(errors.map((error) => error.property)),
+          ];
+          setPendingElicitationError(id, {
+            message: `Invalid elicitation content: ${properties.join(", ")}.`,
+            properties,
+          });
+          return errors;
+        }
+
+        const result: ElicitResult = {
+          action: "accept",
+          content: response.content as ElicitResult["content"],
+        };
+        resolvePendingElicitation(id, result);
+        return;
+      }
+
+      resolvePendingElicitation(id, { action: response.action });
+    },
   };
 };
 
-export const McpServerResource = resource(useMcpServerResource);
+const McpServerResourceInstance = resource(useMcpServerResourceInstance);
+
+export const McpServerResource = resource(function useMcpServerResource(
+  props: McpServerResourceProps,
+): ClientOutput<"mcpServer"> {
+  const transportCloseQueueRef = useRef(Promise.resolve());
+  const dependencies = getConnectionDependencies(props);
+  const [connection, setConnection] = useState({ dependencies, generation: 0 });
+  let currentConnection = connection;
+  if (!areConnectionDependenciesEqual(connection.dependencies, dependencies)) {
+    currentConnection = {
+      dependencies,
+      generation: connection.generation + 1,
+    };
+    setConnection(currentConnection);
+  }
+
+  // Storage keys remounts through its optional scopeId rather than object
+  // identity, because a defaulted storage element is rebuilt on ordinary
+  // renders.
+  return useResource(
+    withKey(
+      currentConnection.generation,
+      McpServerResourceInstance({ ...props, transportCloseQueueRef }),
+    ),
+  );
+});

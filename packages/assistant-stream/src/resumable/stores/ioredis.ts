@@ -4,7 +4,10 @@ import type {
   Redis as IoRedis,
 } from "ioredis";
 import {
+  FINALIZE_IF_UNCHANGED_KEY_COUNT,
+  FINALIZE_IF_UNCHANGED_SCRIPT,
   RedisResumableStreamStore,
+  finalizeIfUnchangedArgs,
   type PipelineCommand,
   type RedisLikeClient,
   type RedisResumableStreamStoreOptions,
@@ -15,7 +18,7 @@ export type IoRedisLike = IoRedis | IoRedisCluster;
 
 /**
  * Resumable stream store backed by [`ioredis`](https://www.npmjs.com/package/ioredis)
- * v5. Accepts a `Redis` or `Cluster` instance.
+ * v5 or v6. Accepts a `Redis` or `Cluster` instance.
  */
 export function createIoredisResumableStreamStore(
   client: IoRedisLike,
@@ -68,6 +71,14 @@ function adapt(client: IoRedisLike): RedisLikeClient {
       for (const [err] of results) {
         if (err) throw err;
       }
+    },
+    async finalizeIfUnchanged(options) {
+      const result = await client.eval(
+        FINALIZE_IF_UNCHANGED_SCRIPT,
+        FINALIZE_IF_UNCHANGED_KEY_COUNT,
+        ...finalizeIfUnchangedArgs(options),
+      );
+      return result === 1;
     },
   };
 }

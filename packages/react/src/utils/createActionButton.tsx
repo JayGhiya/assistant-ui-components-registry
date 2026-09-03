@@ -5,7 +5,7 @@ import {
   type MouseEventHandler,
 } from "react";
 import { Primitive } from "./Primitive";
-import { composeEventHandlers } from "@radix-ui/primitive";
+import { composeEventHandlers } from "radix-ui/internal";
 
 type ActionButtonCallback<TProps> = (
   props: TProps,
@@ -41,8 +41,8 @@ export const createActionButton = <TProps,>(
     const callback = useActionButton(forwardedProps as TProps) ?? undefined;
     return (
       <Primitive.button
-        {...primitiveProps}
         type="button"
+        {...primitiveProps}
         ref={forwardedRef}
         disabled={primitiveProps.disabled || !callback}
         onClick={composeEventHandlers(primitiveProps.onClick, callback)}

@@ -1,7 +1,7 @@
 "use client";
 
-import { composeEventHandlers } from "@radix-ui/primitive";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { composeEventHandlers } from "radix-ui/internal";
+import { useComposedRefs } from "radix-ui/internal";
 import { Slot } from "radix-ui";
 import {
   type ClipboardEvent,
@@ -19,7 +19,7 @@ import TextareaAutosize, {
   type TextareaAutosizeProps,
   type TextareaHeightChangeMeta,
 } from "react-textarea-autosize";
-import { useEscapeKeydown } from "@radix-ui/react-use-escape-keydown";
+import { useEscapeKeydown } from "radix-ui/internal";
 import { useOnScrollToBottom } from "../../utils/hooks/useOnScrollToBottom";
 import { useMediaQuery } from "../../utils/hooks/useMediaQuery";
 import { useAui } from "@assistant-ui/store";
@@ -199,6 +199,9 @@ export const ComposerPrimitiveInput = forwardRef<
       // Only handle ESC if it originated from within this input
       if (!textareaRef.current?.contains(e.target as Node)) return;
 
+      // ignore IME composition events
+      if (e.isComposing) return;
+
       // Let registered plugins (mention, slash command, etc.) handle Escape first
       if (pluginRegistry) {
         for (const plugin of pluginRegistry.getPlugins()) {
@@ -343,7 +346,7 @@ export const ComposerPrimitiveInput = forwardRef<
       )
         return undefined;
 
-      return aui.on("threadListItem.switchedTo", focus);
+      return aui.on("threads.selectionChanged", focus);
     }, [unstable_focusOnThreadSwitched, focus, aui]);
 
     useEffect(() => {

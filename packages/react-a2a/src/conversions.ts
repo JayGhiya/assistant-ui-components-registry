@@ -1,7 +1,14 @@
 "use client";
 
-import type { MessageStatus, ThreadAssistantMessage } from "@assistant-ui/core";
-import { httpUrlPattern, parseDataUrl } from "@assistant-ui/core/internal";
+import type {
+  MessageStatus,
+  ThreadAssistantMessage,
+  ThreadMessage,
+} from "@assistant-ui/core";
+import {
+  parseDataUrl,
+  resolveFilePartSource,
+} from "@assistant-ui/core/internal";
 import type { A2AMessage, A2APart, A2ATaskState } from "./types";
 
 function isImageMediaType(mediaType?: string): boolean {
@@ -16,11 +23,18 @@ export function a2aPartToContent(
   }
   if (part.url !== undefined) {
     if (isImageMediaType(part.mediaType)) {
-      return { type: "image", image: part.url };
+      return {
+        type: "image",
+        image: part.url,
+        ...(part.filename && { filename: part.filename }),
+      };
     }
     return {
-      type: "text",
-      text: part.filename ? `[${part.filename}](${part.url})` : part.url,
+      type: "file",
+      data: part.url,
+      mimeType: part.mediaType ?? "application/octet-stream",
+      sourceType: "url",
+      ...(part.filename && { filename: part.filename }),
     };
   }
   if (part.raw !== undefined) {
@@ -28,11 +42,14 @@ export function a2aPartToContent(
       return {
         type: "image",
         image: `data:${part.mediaType};base64,${part.raw}`,
+        ...(part.filename && { filename: part.filename }),
       };
     }
     return {
-      type: "text",
-      text: `[File: ${part.filename ?? "download"}]`,
+      type: "file",
+      data: part.raw,
+      mimeType: part.mediaType ?? "application/octet-stream",
+      ...(part.filename && { filename: part.filename }),
     };
   }
   if (part.data !== undefined) {
@@ -44,7 +61,7 @@ export function a2aPartToContent(
 export function a2aPartsToContent(
   parts: A2APart[],
 ): ThreadAssistantMessage["content"] {
-  return parts.map(a2aPartToContent);
+  return (Array.isArray(parts) ? parts : []).map(a2aPartToContent);
 }
 
 const TERMINAL_STATES = new Set<A2ATaskState>([
@@ -95,6 +112,7 @@ export function contentPartsToA2AParts(
     data?: unknown;
     mimeType?: string | undefined;
     filename?: string | undefined;
+    sourceType?: "url" | "id" | undefined;
     audio?: { data: string; format: string } | undefined;
   }>,
   fallbackMimeType?: string,
@@ -123,9 +141,14 @@ export function contentPartsToA2AParts(
         case "file": {
           if (typeof part.data !== "string" || !part.data) return null;
           const declaredMimeType = part.mimeType || fallbackMimeType;
-          if (httpUrlPattern.test(part.data)) {
+          const source = resolveFilePartSource({
+            data: part.data,
+            mimeType: declaredMimeType ?? "application/octet-stream",
+            sourceType: part.sourceType,
+          });
+          if (source.kind === "url") {
             return {
-              url: part.data,
+              url: source.url,
               ...(declaredMimeType && { mediaType: declaredMimeType }),
               ...(part.filename && { filename: part.filename }),
             };
@@ -133,12 +156,12 @@ export function contentPartsToA2AParts(
           const parsed = parseDataUrl(part.data);
           if (parsed) {
             return {
-              raw: parsed.data,
-              mediaType: parsed.mimeType,
+              raw: source.data,
+              mediaType: source.mimeType,
               ...(part.filename && { filename: part.filename }),
             };
           }
-          if (part.data.startsWith("data:")) {
+          if (/^data:/i.test(part.data)) {
             return {
               url: part.data,
               ...(declaredMimeType && { mediaType: declaredMimeType }),
@@ -146,7 +169,7 @@ export function contentPartsToA2AParts(
             };
           }
           return {
-            raw: part.data,
+            raw: source.data,
             ...(declaredMimeType && { mediaType: declaredMimeType }),
             ...(part.filename && { filename: part.filename }),
           };
@@ -172,5 +195,42 @@ export function contentPartsToA2AParts(
 export function a2aMessageToContent(
   message: A2AMessage,
 ): ThreadAssistantMessage["content"] {
-  return a2aPartsToContent(message.parts);
+  return a2aPartsToContent(message?.parts ?? []);
+}
+
+export function threadMessageToA2AMessage(
+  message: ThreadMessage,
+  options: {
+    contextId?: string | undefined;
+    taskId?: string | undefined;
+  } = {},
+): A2AMessage {
+  const parts: A2APart[] = [];
+
+  if (message.role === "user") {
+    parts.push(...contentPartsToA2AParts(message.content));
+    for (const attachment of message.attachments ?? []) {
+      parts.push(
+        ...contentPartsToA2AParts(
+          attachment.content ?? [],
+          attachment.contentType,
+        ),
+      );
+    }
+  }
+
+  const a2aMsg: A2AMessage = {
+    messageId: message.id,
+    role: "user",
+    parts,
+  };
+
+  if (options.contextId) {
+    a2aMsg.contextId = options.contextId;
+  }
+  if (options.taskId) {
+    a2aMsg.taskId = options.taskId;
+  }
+
+  return a2aMsg;
 }

@@ -1,12 +1,22 @@
-import { examples, source } from "@/lib/source";
+import {
+  design,
+  elementsDocs,
+  examples,
+  source,
+  getTapDocsPages,
+} from "@/lib/source";
 import { getLLMText } from "@/lib/get-llm-text";
 
 export const revalidate = false;
 
 export async function GET() {
-  const scan = [...source.getPages(), ...examples.getPages()].map((page) =>
-    getLLMText(page),
-  );
+  const scan = [
+    ...source.getPages(),
+    ...getTapDocsPages(),
+    ...examples.getPages(),
+    ...design.getPages(),
+    ...elementsDocs.getPages(),
+  ].map((page) => getLLMText(page));
   const scanned = await Promise.all(scan);
 
   return new Response(scanned.join("\n\n"), {

@@ -11,7 +11,7 @@ External API spec for the MCP integration package. Mirrors `@assistant-ui/react-
 
 Both share one connection lifecycle, one persisted state surface, and one tool registration path.
 
-**Tools only.** v1 lists and invokes tools, registering them as **frontend tools** with `modelContext` so a connected chat runtime sees them automatically. Resources, prompts, sampling, server-pushed list updates, and resumable sessions are deferred.
+**Tools and form elicitation.** v1 lists and invokes tools, registering them as **frontend tools** with `modelContext` so a connected chat runtime sees them automatically. Servers can also request structured user input through pending elicitations. Server-pushed tool list updates refresh the registered tools automatically; update failures preserve the existing tool list and appear in the server error state. Resources, prompts, sampling, and resumable sessions are deferred.
 
 **Three auth modes only:** OAuth (PKCE + RFC 7591 DCR), Bearer, None.
 
@@ -19,7 +19,7 @@ Both share one connection lifecycle, one persisted state surface, and one tool r
 
 ## Design principles
 
-- **One entry point.** `McpManagerResource` — mount via `useAui({ mcp: McpManagerResource(...) })`. No provider wrapper, no imperative hooks.
+- **One entry point.** `McpManagerResource` — `AuiConfig({ mcp: McpManagerResource(...) })` builds the configuration; `<AuiProvider config={...}>` or `<AssistantRuntimeProvider config={...}>` mounts it. No dedicated MCP provider wrapper, no imperative hooks.
 - **Tap-first.** Connection lifecycle, tool lists, and tool registration are tap state. Components read via `useAuiState`; methods called via `aui.mcp().x()` in callbacks (never during render).
 - **One source of truth.** Persisted state goes through `MCPStorage` (a tap resource). `McpLocalStorage` is the default; swap by passing a different resource.
 - **Unstyled primitives.** `data-*` attributes for styling, no CSS, no business logic — matches `SpanPrimitive`.
@@ -35,6 +35,7 @@ packages/react-mcp/
 │   ├── resources/
 │   │   ├── McpManagerResource.ts               root; auto-mounts modelContext
 │   │   ├── McpServerResource.ts                per-server
+│   │   ├── validateElicitationContent.ts       flat client-side validation
 │   │   └── storage/
 │   │       ├── McpLocalStorage.ts
 │   │       ├── McpMemoryStorage.ts
@@ -51,7 +52,9 @@ packages/react-mcp/
 │   │   ├── server.ts                           barrel (McpServerPrimitive.*)
 │   │   ├── server/{Root,Icon,Name,Status,Error,ConnectButton,DisconnectButton,RemoveButton,OAuthLink,Tools,ToolName}.tsx
 │   │   ├── addForm.ts                          barrel (McpAddFormPrimitive.*)
-│   │   └── addForm/{Root,NameField,UrlField,AuthSelect,AuthFields,Submit,Cancel,Error}.tsx
+│   │   ├── addForm/{Root,NameField,UrlField,AuthSelect,AuthFields,Submit,Cancel,Error}.tsx
+│   │   ├── elicitation.ts                       barrel (McpElicitationPrimitive.*)
+│   │   └── elicitation/{Items,Root,Message,Error,Fields,Accept,Decline,Cancel,initialElicitationDraft}.tsx
 │   ├── hooks/
 │   │   └── useMcpOAuthCallback.tsx
 │   └── index.ts
@@ -64,15 +67,15 @@ After the v0.1 simplification, the package's runtime surface is:
 
 | Export | Purpose |
 | --- | --- |
-| `McpManagerResource` | Root tap resource — mount via `useAui({ mcp: McpManagerResource({...}) })`. Auto-registers connected tools with `modelContext`. |
+| `McpManagerResource` | Root tap resource — built into a config via `AuiConfig({ mcp: McpManagerResource({...}) })`, mounted by `AuiProvider` or `AssistantRuntimeProvider`. Auto-registers connected tools with `modelContext`. |
 | `McpServerResource` | Per-server resource (advanced — used internally by `McpManagerResource`) |
 | `McpLocalStorage`, `McpMemoryStorage`, `McpCustomStorage` | Storage resource factories |
 | `defineConnector` | Identity-typed helper for `MCPConnector` objects |
-| `McpManagerPrimitive.*`, `McpServerPrimitive.*`, `McpAddFormPrimitive.*` | Unstyled UI primitives |
+| `McpManagerPrimitive.*`, `McpServerPrimitive.*`, `McpAddFormPrimitive.*`, `McpElicitationPrimitive.*` | Unstyled UI primitives |
 | `McpServerByIdProvider` | Scope a subtree to one server (used by iteration primitives; useful standalone) |
 | `useMcpOAuthCallback`, `McpOAuthCallback` | OAuth callback page handlers |
 
-There is no `MCPProvider` (mount the resource directly with `useAui`), no `useMcpManager` (`useAui().mcp()` in callbacks per the [tap skill](/.claude/skills/tap/SKILL.md)), no `useMcpTools` (auto-registered via `modelContext`), no `canAddCustom` (hide the add-UI to disable), no `mcpRuntimeToolsToAiSdkTools` (the runtime sees tools through `modelContext`).
+There is no `MCPProvider` (mount the resource directly with `useAui`), no `useMcpManager` (`useAui().mcp()` in callbacks per the [tap methods guide](../../apps/docs/content/tap-docs/store/methods.mdx)), no `useMcpTools` (auto-registered via `modelContext`), no `canAddCustom` (hide the add-UI to disable), no `mcpRuntimeToolsToAiSdkTools` (the runtime sees tools through `modelContext`).
 
 ## 1. Types
 
@@ -86,6 +89,8 @@ type MCPConnector = {
   icon?: string;
   auth: MCPAuthConfig;
   connectionTimeout?: number;
+  cache?: { defaultTtlMs?: number };
+  elicitation?: boolean;
 };
 defineConnector(c: MCPConnector): MCPConnector;
 ```
@@ -99,6 +104,8 @@ type MCPCustomServerRecord = {
   url: string;
   auth: MCPAuthConfig;
   connectionTimeout?: number;
+  cache?: { defaultTtlMs?: number };
+  elicitation?: boolean;
   createdAt: number;
 };
 ```
@@ -114,12 +121,28 @@ type MCPConnectionState =
 
 type MCPToolInfo = { name: string; description?: string; inputSchema: unknown };
 
+type MCPElicitation = {
+  readonly id: string;
+  readonly message: string;
+  readonly requestedSchema: unknown;
+  readonly error?: {
+    readonly message: string;
+    readonly properties?: readonly string[];
+  } | undefined;
+};
+
+type MCPElicitationResponse =
+  | { action: "accept"; content: Record<string, unknown> }
+  | { action: "decline" }
+  | { action: "cancel" };
+
 type MCPServerState = {
   id: string; kind: MCPServerKind; name: string; url: string;
   icon?: string; connectionState: MCPConnectionState;
   lastError: { message: string } | null;
   tools: MCPToolInfo[];
   authorizationUrl: string | null;
+  readonly pendingElicitations: readonly MCPElicitation[];
 };
 
 type MCPManagerState = {
@@ -146,7 +169,7 @@ declare module "@assistant-ui/store" {
 type MCPManagerMethods = {
   getState: () => MCPManagerState;
   server: (lookup: { id: string }) => MCPServerMethods;
-  addCustomServer: (input: { name: string; url: string; auth: MCPAuthConfig; connectionTimeout?: number }) => Promise<string>;
+  addCustomServer: (input: { name: string; url: string; auth: MCPAuthConfig; connectionTimeout?: number; elicitation?: boolean }) => Promise<string>;
   removeServer: (id: string) => Promise<void>;
 };
 
@@ -158,6 +181,7 @@ type MCPServerMethods = {
   callTool: (name: string, args: unknown) => Promise<unknown>;
   readResource: (uri: string) => Promise<unknown>;
   completeAuth: (callbackUrl: string) => Promise<void>;
+  answerElicitation: (id: string, response: MCPElicitationResponse) => readonly { property: string; message: string }[] | undefined;
 };
 ```
 
@@ -167,6 +191,7 @@ type MCPServerMethods = {
 
 ```ts
 type MCPStorage = {
+  scopeId?: string;
   loadCustomServers: () => Promise<MCPCustomServerRecord[]>;
   saveCustomServers: (records: MCPCustomServerRecord[]) => Promise<void>;
   loadAuthState: (serverId: string) => Promise<MCPPersistedAuthState | null>;
@@ -178,22 +203,26 @@ type MCPPersistedAuthState = {
   tokens?: OAuthTokens;
   clientInformation?: OAuthClientInformationFull;
   codeVerifier?: string;
+  state?: string;
+  discoveryState?: OAuthDiscoveryState;
   token?: string;   // bearer
 };
 
-McpLocalStorage(opts?: { keyPrefix?: string; storage?: Storage }): ResourceElement<MCPStorage>;
+McpLocalStorage(opts?: { keyPrefix?: string; storage?: Storage; scopeId?: string }): ResourceElement<MCPStorage>;
 McpMemoryStorage(): ResourceElement<MCPStorage>;
 McpCustomStorage(impl: MCPStorage): ResourceElement<MCPStorage>;
 ```
 
 `McpLocalStorage` defaults to `globalThis.localStorage` under the `aui-mcp:` prefix. Tokens are plain text — production apps should use `McpCustomStorage` against a server endpoint.
 
+`scopeId` is the storage's stable identity: two storages with the same `scopeId` must read and write the same persisted data. Servers with `bearer` or `oauth` auth key their connection on it, so swapping to a differently-scoped storage reconnects (and rebinds the OAuth provider) instead of leaving a live connection on the replaced store. A storage without a `scopeId` never keys a reconnect — the legacy behavior. `McpLocalStorage` derives `local-storage:<keyPrefix>` when backed by the shared `globalThis.localStorage` and declares no scope for a custom `storage` backing unless `scopeId` is passed; `McpMemoryStorage` scopes each instance uniquely (`memory:<id>`), since each holds private data. Only connections key on the scope: `McpManagerResource` loads the custom server list once on mount and does not re-read it when `storage` changes.
+
 ## 3. Mounting
 
 ```tsx
 // One line — no provider component.
 function App() {
-  const aui = useAui({
+  const config = AuiConfig({
     mcp: McpManagerResource({
       connectors: [
         defineConnector({
@@ -210,7 +239,7 @@ function App() {
       // oauthRedirectUri: "https://app.example.com/mcp/callback",
     }),
   });
-  return <AuiProvider value={aui}><Page /></AuiProvider>;
+  return <AuiProvider config={config}><Page /></AuiProvider>;
 }
 ```
 
@@ -242,14 +271,14 @@ type MCPAuthConfig =
 
 The OAuth strategy implements the MCP SDK's `OAuthClientProvider`. The SDK handles discovery, DCR, PKCE, token exchange, and refresh; this provider only mediates `MCPStorage` reads/writes and the redirect step.
 
-The server id is embedded in the OAuth `state` parameter so a single `/mcp/callback` route routes back to the right server without app-level wiring.
+The server id is embedded in the OAuth `state` parameter so a single `/mcp/callback` route routes back to the right server without app-level wiring. The complete state value is persisted with the PKCE verifier and validated before the callback is processed.
 
 Flow:
 
 1. `aui.mcp().server({ id }).connect()` → SDK starts auth.
 2. `redirectToAuthorization` stores `authorizationUrl` on server state, transitions to `authRequired`. **The package does not auto-navigate** — render `<McpServerPrimitive.OAuthLink>` (an anchor) or open a popup.
 3. User returns to `oauthRedirectUri`. Mount `<McpOAuthCallback />` there.
-4. Callback reads `?state=&code=`, derives the server id, calls `server.completeAuth(window.location.href)`.
+4. Callback reads `?state=` plus either an OAuth `code` or `error`, derives the server id, validates the complete state value, and calls `server.completeAuth(window.location.href)`.
 5. Server transitions to `connecting → connected`. Refresh tokens are rotated automatically; a failed refresh moves to `authRequired`.
 
 ## 5. Primitives
@@ -257,7 +286,7 @@ Flow:
 Same conventions as `SpanPrimitive`: `forwardRef`, Radix `Primitive.<tag>`, namespaced `Element`/`Props`, `data-*` rendering.
 
 ```tsx
-import { McpManagerPrimitive, McpServerPrimitive, McpAddFormPrimitive } from "@assistant-ui/react-mcp";
+import { McpManagerPrimitive, McpServerPrimitive, McpAddFormPrimitive, McpElicitationPrimitive } from "@assistant-ui/react-mcp";
 
 <McpManagerPrimitive.Root>
   <McpManagerPrimitive.Connectors>
@@ -294,6 +323,39 @@ The add form owns its own draft state and submits via `aui.mcp().addCustomServer
 </McpAddFormPrimitive.Root>
 ```
 
+Render form-mode elicitation inside a server-scoped subtree. Each item owns an isolated draft, and `Fields` renders nothing when the requested schema has no usable `properties` object:
+
+```tsx
+<McpElicitationPrimitive.Items>
+  {() => (
+    <McpElicitationPrimitive.Root>
+      <McpElicitationPrimitive.Message />
+      <McpElicitationPrimitive.Error />
+      <McpElicitationPrimitive.Fields>
+        {({ name, value, setValue }) => (
+          <input
+            name={name}
+            value={typeof value === "string" ? value : ""}
+            onChange={(event) => setValue(event.target.value)}
+          />
+        )}
+      </McpElicitationPrimitive.Fields>
+      <McpElicitationPrimitive.Accept>Submit</McpElicitationPrimitive.Accept>
+      <McpElicitationPrimitive.Decline>Decline</McpElicitationPrimitive.Decline>
+      <McpElicitationPrimitive.Cancel>Cancel</McpElicitationPrimitive.Cancel>
+    </McpElicitationPrimitive.Root>
+  )}
+</McpElicitationPrimitive.Items>
+```
+
+`useMcpElicitation()` reads the current request inside `Items`. `useMcpElicitationField()` reads the current field inside the element returned from the `Fields` render function.
+
+`Accept` sets `data-missing-required` when required properties resolve to absent and `data-invalid` to comma-joined invalid property names when validation fails. It is disabled until both conditions are empty. Each item seeds its draft from flat schema defaults when the default matches a declared `string`, `number`, `integer`, or `boolean` type. Absent required boolean properties are submitted with the schema's boolean `default` when one is present, otherwise `false`; optional booleans remain omitted. It converts parseable string values from flat `number` and `integer` properties to numbers before submitting the response content. Boolean drafts must be real booleans (compose a checkbox); string drafts are coerced only for `number` and `integer` properties and are flagged invalid for booleans. The `elicitation` flag defaults to advertising the capability; `false` skips both the capability declaration and the handler registration, and, like the rest of the capability set, a changed flag applies from the next connect rather than mid-connection.
+
+An empty-string draft is a field's blank state rather than a value: it resolves to absent unless the schema names `""` as a legal value for an untyped or `string` property through an `enum` member or a `""` default. A cleared `boolean`, `number`, or `integer` property always resolves to absent, whatever its `enum` or `default` declares. Clearing a field therefore returns it to absent instead of leaving it invalid, so an optional property drops out of the response content and a required one reports `data-missing-required` until a value is supplied. The blank state is a draft-side rule; `""` stays a legal value on the wire, so a caller that builds content itself can still send it for a required `string`.
+
+An accepted response is client-side validated for required-property presence, `string`, `number`, `integer`, and `boolean` types, and declared enum membership. Constraints outside that flat subset, such as `minLength` and `format`, pass through for the server to judge. `answerElicitation` returns `undefined` when it applies an answer or the id is unknown. On validation failure, it keeps the elicitation pending, sets its `error`, leaves the server request unresolved, and returns the validation errors so the caller can correct the draft. `McpElicitationPrimitive.Error` renders the error message and exposes its property names as comma-joined `data-properties` when available.
+
 ## 6. Lifecycle
 
 ```
@@ -305,6 +367,8 @@ mount McpManagerResource
   → toolkit memo recomputes; modelContext.register(toolkit) (re-registers on change)
 ```
 
+During auto-connect, a rejected `storage.loadAuthState()` sets `lastError` and transitions the server to `"error"` without creating a transport; failures from cancelled or superseded attempts are ignored.
+
 `McpServerResource.connect()`:
 
 1. `state = "connecting"`.
@@ -312,7 +376,7 @@ mount McpManagerResource
 3. `client.connect(transport)` — on `UnauthorizedError` set `authorizationUrl` and transition to `"authRequired"`; on other errors set `lastError` and transition to `"error"`.
 4. On success: `listTools()`, transition to `"connected"`.
 
-`completeAuth(url)`: parse `code`, call `transport.finishAuth(code)`, retry `client.connect()`.
+`completeAuth(url)`: require an exact match with the persisted `state`, accept either `code` or an OAuth `error`, pass the complete callback `URLSearchParams` (including `iss`) to `transport.finishAuth()`, then retry `client.connect()` after successful authorization. Those pre-transport checks, and a rejected `storage.loadAuthState()` inside `completeAuth`, reject without touching `connectionState` or `lastError`, so a forged callback cannot disturb a connected server; from `finishAuth()` onwards a failure sets `lastError` and transitions to `"error"`.
 
 ## 7. OAuth callback
 
@@ -328,7 +392,7 @@ useMcpOAuthCallback(opts?): { status; serverId; error };
 </McpOAuthCallback>;
 ```
 
-Reads `window.location` (override with `url` prop), extracts `state`/`code`, resolves the server, runs `completeAuth`. Pure client-side — mount under `"use client"`.
+Reads `window.location` (override with `url` prop), extracts `state` to resolve the server, and passes the complete callback URL to `completeAuth` for state, issuer, code, and OAuth error validation. Pure client-side — mount under `"use client"`.
 
 ## 8. Tool integration
 
@@ -356,7 +420,8 @@ Errors surface as rejected promises on the manager/server methods. Tool failures
 ```tsx
 // app/providers.tsx
 "use client";
-import { AuiProvider, useAui } from "@assistant-ui/store";
+import type { ReactNode } from "react";
+import { AuiProvider, AuiConfig, useAui } from "@assistant-ui/store";
 import { McpManagerResource, defineConnector } from "@assistant-ui/react-mcp";
 
 const connectors = [
@@ -368,9 +433,44 @@ const connectors = [
   }),
 ];
 
-export function Providers({ children }: { children: React.ReactNode }) {
-  const aui = useAui({ mcp: McpManagerResource({ connectors }) });
-  return <AuiProvider value={aui}>{children}</AuiProvider>;
+export function Providers({ children }: { children: ReactNode }) {
+  const aui = useAui();
+  const config = AuiConfig({ mcp: McpManagerResource({ connectors }) });
+  return (
+    <AuiProvider extends={aui} config={config}>
+      {children}
+    </AuiProvider>
+  );
+}
+```
+
+In a chat app, pass the same config to `AssistantRuntimeProvider` instead — its scopes mount alongside the runtime scope:
+
+```tsx
+// app/providers.tsx — with a chat runtime
+"use client";
+import type { ReactNode } from "react";
+import { AssistantRuntimeProvider, AuiConfig } from "@assistant-ui/react";
+import { useChatRuntime } from "@assistant-ui/ai-sdk";
+import { McpManagerResource, defineConnector } from "@assistant-ui/react-mcp";
+
+const connectors = [
+  defineConnector({
+    id: "linear",
+    name: "Linear",
+    url: "https://mcp.linear.app",
+    auth: { type: "oauth", scopes: ["read"] },
+  }),
+];
+
+export function Providers({ children }: { children: ReactNode }) {
+  const runtime = useChatRuntime();
+  const config = AuiConfig({ mcp: McpManagerResource({ connectors }) });
+  return (
+    <AssistantRuntimeProvider runtime={runtime} config={config}>
+      {children}
+    </AssistantRuntimeProvider>
+  );
 }
 ```
 
@@ -414,7 +514,7 @@ export default function Callback() {
 // app/chat/page.tsx — chat runtime sees MCP tools through modelContext
 // (no useMcpTools / no adapter call — the manager registers them itself)
 "use client";
-import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
+import { useChatRuntime } from "@assistant-ui/ai-sdk";
 
 export function Chat() {
   const runtime = useChatRuntime({ api: "/api/chat" });

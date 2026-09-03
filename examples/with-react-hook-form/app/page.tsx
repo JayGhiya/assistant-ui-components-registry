@@ -1,7 +1,7 @@
 "use client";
 
 import { SignupForm } from "@/components/SignupForm";
-import { Thread } from "@/components/assistant-ui/thread";
+import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { Form } from "@/components/ui/form";
 import {
   ResizableHandle,
@@ -13,6 +13,7 @@ import {
   useAssistantInstructions,
   useAui,
   AuiProvider,
+  AuiConfig,
   Suggestions,
 } from "@assistant-ui/react";
 
@@ -57,7 +58,8 @@ export default function Home() {
     },
   });
 
-  const aui = useAui({
+  const aui = useAui();
+  const config = AuiConfig({
     suggestions: Suggestions([
       {
         title: "Fill out the form",
@@ -74,7 +76,7 @@ export default function Home() {
   });
 
   return (
-    <AuiProvider value={aui}>
+    <AuiProvider extends={aui} config={config}>
       <ResizablePanelGroup orientation="horizontal">
         <ResizablePanel defaultSize={60} minSize={40} style={panelStyle}>
           <div className="bg-muted/30 h-full overflow-y-auto">
